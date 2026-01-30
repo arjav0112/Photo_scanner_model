@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+photos.db
+search_results.log
+.idea/
+.vscode/
+dist/
+build/
+image/
+*.safetensors
+*.onnx
+assets/local_clip_model/
+assets/mobile_model_quantized/
