@@ -74,11 +74,60 @@ def inspect_database(db_path="photos.db"):
                import json
                if meta_json:
                    meta_dict = json.loads(meta_json)
-                   print(f"Metadata: {meta_dict}")
+                   print(f"\n  [Metadata]:")
+                   
+                   # Image Properties
+                   if any(k in meta_dict for k in ['width', 'height', 'format', 'mode']):
+                       print(f"    Image: {meta_dict.get('width', '?')}x{meta_dict.get('height', '?')} | "
+                             f"Format: {meta_dict.get('format', 'N/A')} | Mode: {meta_dict.get('mode', 'N/A')}")
+                   
+                   # Device Information
+                   device_info = []
+                   if 'device_make' in meta_dict:
+                       device_info.append(meta_dict['device_make'])
+                   if 'device_model' in meta_dict:
+                       device_info.append(meta_dict['device_model'])
+                   if device_info:
+                       print(f"    Device: {' '.join(device_info)}")
+                   if 'software' in meta_dict:
+                       print(f"    Software: {meta_dict['software']}")
+                   
+                   # Date/Time
+                   if 'date_taken' in meta_dict:
+                       print(f"    Date Taken: {meta_dict['date_taken']}")
+                   
+                   # Camera Settings
+                   camera_settings = []
+                   if 'iso' in meta_dict:
+                       camera_settings.append(f"ISO {meta_dict['iso']}")
+                   if 'aperture' in meta_dict:
+                       camera_settings.append(meta_dict['aperture'])
+                   if 'shutter_speed' in meta_dict:
+                       camera_settings.append(meta_dict['shutter_speed'])
+                   if 'focal_length' in meta_dict:
+                       camera_settings.append(meta_dict['focal_length'])
+                   if camera_settings:
+                       print(f"    Camera: {' | '.join(camera_settings)}")
+                   if 'flash' in meta_dict:
+                       print(f"    Flash: {meta_dict['flash']}")
+                   
+                   # GPS Location
+                   if 'location' in meta_dict:
+                       print(f"    [GPS]: {meta_dict['location']}")
+                       if 'location_name' in meta_dict:
+                           print(f"    [Location]: {meta_dict['location_name']}")
+                       if 'gps_altitude' in meta_dict:
+                           print(f"    Altitude: {meta_dict['gps_altitude']}")
+                       if 'gps_timestamp' in meta_dict:
+                           print(f"    GPS Time: {meta_dict['gps_timestamp']}")
+                   
+                   # Show raw if empty
+                   if not meta_dict:
+                       print(f"    (No metadata available)")
                else:
-                   print("Metadata: {}")
+                   print(f"\n  [Metadata]: (None)")
             except Exception as e:
-               print(f"Metadata: [Error decoding] {e}")
+               print(f"\n  [Metadata]: [Error decoding] {e}")
                
             print("-" * 100)
             

@@ -55,11 +55,24 @@ poetry run python main.py scan .
 Once scanned, you can search your library instantly.
 
 ```bash
-poetry run python main.py search "birthday cake"
 poetry run python main.py search "invoice January"
 ```
 
 The results are displayed in the terminal and saved to `search_results.log`.
+
+### 3. Setup for Offline-Only Mode
+To run fully offline (no internet connection required), run the one-time setup script:
+```bash
+poetry run python setup_offline.py
+```
+This saves the model physically to `assets/local_clip_model`.
+
+### 4. Optimize for Mobile
+To generate a lightweight (150MB) ONNX model for phone apps:
+```bash
+poetry run python export_to_mobile.py
+```
+This reduces model size by ~4x (Quantization) and saves it to `assets/mobile_model_quantized/`.
 
 ## Architecture & Models
 
