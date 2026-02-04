@@ -13,3 +13,4 @@ image/
 *.onnx
 assets/local_clip_model/
 assets/mobile_model_quantized/
+test_images/

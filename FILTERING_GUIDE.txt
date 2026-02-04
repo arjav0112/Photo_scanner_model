@@ -1,0 +1,152 @@
+# Adaptive Threshold Filtering System
+
+## Overview
+
+The search system now uses an **adaptive threshold filtering** approach instead of showing a fixed number of top results. This ensures that when you search for "cat", you only see cat images (high-scoring matches), not low-scoring cow images.
+
+## How It Works
+
+### The Mathematical Formula
+
+The filtering uses a dynamic threshold calculated as:
+
+```
+threshold = max(
+    top_score × (1 - RELATIVE_THRESHOLD),
+    MIN_ABSOLUTE_SCORE
+)
+```
+
+**Only images with `score >= threshold` are shown.**
+
+### Example Calculation
+
+Let's say you search for "cat":
+- Top scoring image (best cat match): **0.85**
+- RELATIVE_THRESHOLD: **0.15** (default)
+- MIN_ABSOLUTE_SCORE: **0.20** (default)
+
+**Threshold calculation:**
+```
+threshold = max(0.85 × (1 - 0.15), 0.20)
+threshold = max(0.85 × 0.85, 0.20)
+threshold = max(0.7225, 0.20)
+threshold = 0.7225
+```
+
+**Results:**
+- Image with score 0.84 → **SHOWN** (within 15% of top)
+- Image with score 0.75 → **SHOWN** (within 15% of top)
+- Image with score 0.70 → **NOT SHOWN** (below threshold)
+- Image with score 0.40 → **NOT SHOWN** (below threshold)
+
+## Configuration Parameters
+
+Edit `search_config.py` to adjust these values:
+
+### 1. RELATIVE_THRESHOLD (default: 0.15)
+
+Controls how close to the top score images must be to be shown.
+
+- **0.05-0.10**: Very strict - only nearly identical matches
+  - Example: Top=0.90 → Shows images with score ≥ 0.81-0.855
+  
+- **0.15-0.20**: Balanced (recommended) - shows relevant images
+  - Example: Top=0.90 → Shows images with score ≥ 0.72-0.765
+  
+- **0.25-0.35**: Lenient - shows more variety
+  - Example: Top=0.90 → Shows images with score ≥ 0.585-0.675
+
+### 2. MIN_ABSOLUTE_SCORE (default: 0.20)
+
+Prevents showing very poor matches even if they're close to a low top score.
+
+**Why this matters:**
+- If you search for "unicorn" and no images match well, the top score might be 0.30
+- Without MIN_ABSOLUTE_SCORE, images with score 0.25 would be shown (within 15% of 0.30)
+- With MIN_ABSOLUTE_SCORE=0.20, only images ≥ 0.20 are considered
+
+**Recommended values:**
+- **0.15**: More lenient, shows more results
+- **0.20**: Balanced (default)
+- **0.30**: Strict, filters out weak matches
+
+### 3. MAX_RESULTS (default: 50)
+
+Safety limit to prevent overwhelming output.
+
+Even if 100 images pass the threshold, only the top MAX_RESULTS are shown.
+
+## Preset Configurations
+
+### Strict Mode
+```python
+RELATIVE_THRESHOLD = 0.08
+MIN_ABSOLUTE_SCORE = 0.30
+MAX_RESULTS = 20
+```
+**Use when:** You want only the most similar images
+
+### Balanced Mode (Default)
+```python
+RELATIVE_THRESHOLD = 0.15
+MIN_ABSOLUTE_SCORE = 0.20
+MAX_RESULTS = 50
+```
+**Use when:** General purpose searching
+
+### Lenient Mode
+```python
+RELATIVE_THRESHOLD = 0.25
+MIN_ABSOLUTE_SCORE = 0.15
+MAX_RESULTS = 100
+```
+**Use when:** You want to explore more variety
+
+### Exploration Mode
+```python
+RELATIVE_THRESHOLD = 0.35
+MIN_ABSOLUTE_SCORE = 0.10
+MAX_RESULTS = 200
+```
+**Use when:** You want to see everything remotely relevant
+
+## Understanding the Output
+
+When you run a search, you'll see filtering statistics:
+
+```
+--- Filtering Statistics ---
+Configuration: Relative=0.15, MinScore=0.2, MaxResults=50
+Top score: 0.8542
+Score threshold: 0.7261
+Images passing threshold: 12/1500
+----------------------------
+```
+
+This tells you:
+- **Top score**: The best matching image's score
+- **Score threshold**: The calculated cutoff point
+- **Images passing**: How many images met the criteria out of total images
+
+## Benefits of This Approach
+
+1. **Dynamic**: Automatically adjusts based on match quality
+2. **Relevant**: Shows only images similar to the best match
+3. **Smart**: Handles both high-quality and low-quality matches appropriately
+4. **Configurable**: Easy to tune for your specific needs
+
+## Tips for Tuning
+
+- **Getting too many results?** 
+  - Decrease RELATIVE_THRESHOLD (e.g., 0.15 → 0.10)
+  - Increase MIN_ABSOLUTE_SCORE (e.g., 0.20 → 0.30)
+
+- **Getting too few results?**
+  - Increase RELATIVE_THRESHOLD (e.g., 0.15 → 0.25)
+  - Decrease MIN_ABSOLUTE_SCORE (e.g., 0.20 → 0.15)
+
+- **Want to see exact number of results?**
+  - Set RELATIVE_THRESHOLD very high (e.g., 0.99)
+  - Set MIN_ABSOLUTE_SCORE very low (e.g., 0.01)
+  - Set MAX_RESULTS to your desired number

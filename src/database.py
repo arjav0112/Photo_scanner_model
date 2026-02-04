@@ -134,7 +134,8 @@ class PhotoDatabase:
 
     def get_search_data_generator(self, batch_size: int = 1000):
         """
-        Yields batches of (paths, embeddings, ocr_texts) for memory-efficient search.
+        Yields batches of (paths, embeddings, ocr_texts, metadata_list) for memory-efficient search.
+        Now includes metadata for metadata-aware search.
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -144,7 +145,8 @@ class PhotoDatabase:
         cols = [c[1] for c in cursor.fetchall()]
         has_ocr = "ocr_text" in cols
         
-        query = "SELECT path, embedding, " + ("ocr_text " if has_ocr else "'' ") + "FROM photos WHERE embedding IS NOT NULL"
+        # Now also retrieve metadata
+        query = "SELECT path, embedding, " + ("ocr_text, " if has_ocr else "'', ") + "metadata FROM photos WHERE embedding IS NOT NULL"
         cursor.execute(query)
         
         while True:
@@ -155,15 +157,23 @@ class PhotoDatabase:
             paths = []
             embeddings = []
             ocr_texts = []
+            metadata_list = []
             
             for row in rows:
-                path, blob, text = row
+                path, blob, text, metadata_json = row
                 emb = np.frombuffer(blob, dtype=np.float32)
                 paths.append(path)
                 embeddings.append(emb)
                 ocr_texts.append(text if text else "")
+                
+                # Parse metadata JSON
+                try:
+                    metadata = json.loads(metadata_json) if metadata_json else {}
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+                metadata_list.append(metadata)
             
-            yield paths, np.vstack(embeddings).astype(np.float32), ocr_texts
+            yield paths, np.vstack(embeddings).astype(np.float32), ocr_texts, metadata_list
             
         conn.close()
 

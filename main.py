@@ -4,6 +4,9 @@ import argparse
 from src.scanner import PhotoScanner
 from src.database import PhotoDatabase
 from src.model_handler import MobileCLIPHandler
+from src.metadata_scorer import score_batch_metadata
+from search_config import SearchConfig
+# from ocr_config import OCRConfig
 import numpy as np
 
 def main():
@@ -41,6 +44,11 @@ def main():
         print("Loading database...")
         db = PhotoDatabase()
         
+        # Load search configuration
+        SearchConfig.validate()
+        config = SearchConfig.get_config()
+        metadata_weight = config['metadata_weight']
+        
         # Batch Processing for efficient memory usage
         all_results = []
         
@@ -51,35 +59,43 @@ def main():
         
         total_images = 0
         
-        for paths, image_embs, ocr_texts in batch_gen:
+        for paths, image_embs, ocr_texts, metadata_list in batch_gen:
              count = len(paths)
              total_images += count
              
-             # Normalize
+             # Normalize image embeddings
              norms = np.linalg.norm(image_embs, axis=1, keepdims=True)
              image_embs = image_embs / (norms + 1e-8)
              
-             # Vector Scores
+             # Vector Scores (Visual Similarity)
              vector_scores = np.dot(image_embs, text_emb)
              
-             # OCR Scores
+             # OCR Scores (Hybrid: Exact + Semantic Matching)
              ocr_scores = np.zeros(count)
              if has_text_query:
                  for i, text in enumerate(ocr_texts):
                      if text and query_lower in text.lower():
                          ocr_scores[i] = 1.0
              
-             # Combine
-             final_batch_scores = vector_scores + ocr_scores
+             # Metadata Scores (Location, Date, Device, Camera, etc.)
+             metadata_scores, metadata_reasons = score_batch_metadata(args.query, metadata_list)
+             metadata_scores = np.array(metadata_scores)
              
-             # Collect relevant results (e.g. score > 0.1 to save memory, or all)
-             # Storing all for now to exact match previous behavior
+             final_batch_scores = (
+                 vector_scores * 1.0 +                    # Visual similarity (PRIMARY)
+                 ocr_scores +               # OCR boost (ADAPTIVE)
+                 metadata_scores * metadata_weight        # Metadata boost (CONFIGURABLE)
+             )
+             
+             # Collect relevant results
              for i in range(count):
                  all_results.append({
                      "path": paths[i],
                      "score": final_batch_scores[i],
                      "v_score": vector_scores[i],
-                     "o_score": ocr_scores[i]
+                     "o_score": ocr_scores[i],
+                     "m_score": metadata_scores[i],
+                     "m_reasons": metadata_reasons[i]
                  })
                  
         if total_images == 0:
@@ -89,26 +105,107 @@ def main():
         print(f"Compared against {total_images} images (Batched).")
         
         # Sort results (highest similarity first)
-        
-        # --- CONTROL: Change this value to show more/less results ---
-        top_k = 5 
-        # ------------------------------------------------------------
-        
         all_results.sort(key=lambda x: x["score"], reverse=True)
-        top_results = all_results[:top_k]
+        
+        # ============================================================
+        # ADAPTIVE THRESHOLD FILTERING
+        # Only show images with scores close to the top score
+        # ============================================================
+        
+        # Load configuration
+        SearchConfig.validate()  # Ensure config is valid
+        config = SearchConfig.get_config()
+        
+        RELATIVE_THRESHOLD = config['relative_threshold']
+        MIN_ABSOLUTE_SCORE = config['min_absolute_score']
+        MAX_RESULTS = config['max_results']
+        
+        if len(all_results) == 0:
+            top_results = []
+        else:
+            top_score = all_results[0]["score"]
+            
+            # Calculate dynamic threshold based on top score
+            # Formula: threshold = top_score * (1 - RELATIVE_THRESHOLD)
+            # This means we show images with score >= (top_score - top_score * RELATIVE_THRESHOLD)
+            score_threshold = max(
+                top_score * (1 - RELATIVE_THRESHOLD),  # Relative threshold
+                MIN_ABSOLUTE_SCORE                      # Absolute minimum
+            )
+            
+            # Filter results based on threshold
+            top_results = [
+                res for res in all_results 
+                if res["score"] >= score_threshold
+            ]
+            
+            # Apply safety limit
+            top_results = top_results[:MAX_RESULTS]
+            
+            # Ensure at least the top result is shown (even if below absolute threshold)
+            if len(top_results) == 0 and len(all_results) > 0:
+                top_results = [all_results[0]]
+            
+            # Log filtering statistics
+            print(f"\n--- Filtering Statistics ---")
+            print(f"Configuration: Relative={RELATIVE_THRESHOLD}, MinScore={MIN_ABSOLUTE_SCORE}, MaxResults={MAX_RESULTS}")
+            print(f"Top score: {top_score:.4f}")
+            print(f"Score threshold: {score_threshold:.4f}")
+            print(f"Images passing threshold: {len(top_results)}/{len(all_results)}")
+            print(f"----------------------------")
         
         # Capture output
         with open("search_results.log", "w", encoding="utf-8") as log:
             log.write("Search Results:\n")
+            log.write(f"Query: '{args.query}'\n")
+            log.write(f"Total images found: {len(top_results)}\n")
+            log.write("="*80 + "\n\n")
+            
             print("\nTop Matches:")
-            for res in top_results:
-                match_type = " (Visual)"
+            print("="*80)
+            
+            for idx, res in enumerate(top_results, 1):
+                # Determine match type
+                match_components = []
+                if res["v_score"] > 0.2:
+                    match_components.append("Visual")
                 if res["o_score"] > 0:
-                    match_type = " (Text + Visual)"
+                    match_components.append("OCR Text")
+                if res["m_score"] > 0:
+                    match_components.append("Metadata")
                 
-                result_str = f"Score: {res['score']:.4f}{match_type}  |  File: {res['path']}"
-                print(result_str)
-                log.write(result_str + "\n")
+                match_type = " + ".join(match_components) if match_components else "Visual"
+                
+                # Format output
+                result_header = f"\n[{idx}] Score: {res['score']:.4f} ({match_type})"
+                result_file = f"    File: {res['path']}"
+                
+                # Score breakdown
+                score_breakdown = f"    Breakdown: Visual={res['v_score']:.3f}, OCR={res['o_score']:.1f}, Metadata={res['m_score']:.2f}"
+                
+                # Metadata reasons
+                metadata_info = ""
+                if res["m_reasons"]:
+                    reasons_str = ", ".join(res["m_reasons"])
+                    metadata_info = f"    Metadata Matches: {reasons_str}"
+                
+                # Print to console
+                print(result_header)
+                print(result_file)
+                print(score_breakdown)
+                if metadata_info:
+                    print(metadata_info)
+                
+                # Write to log
+                log.write(result_header + "\n")
+                log.write(result_file + "\n")
+                log.write(score_breakdown + "\n")
+                if metadata_info:
+                    log.write(metadata_info + "\n")
+                log.write("\n")
+            
+            print("="*80)
+            print(f"\nResults saved to: search_results.log")
     
     else:
         parser.print_help()

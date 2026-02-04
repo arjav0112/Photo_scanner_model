@@ -179,10 +179,12 @@ class PhotoScanner:
                                 meta['gps_longitude'] = lon
                                 meta['location'] = f"{lat:.6f}, {lon:.6f}"
                                 
-                                # Resolve location name offline
-                                location_name = self._resolve_location_name(lat, lon)
-                                if location_name:
-                                    meta['location_name'] = location_name
+                                # Resolve location name offline (only if valid coordinates)
+                                # Skip if coordinates are (0,0) or invalid
+                                if lat != 0.0 and lon != 0.0 and abs(lat) <= 90 and abs(lon) <= 180:
+                                    location_name = self._resolve_location_name(lat, lon)
+                                    if location_name:
+                                        meta['location_name'] = location_name
                             
                             # Altitude
                             if 'GPSAltitude' in gps_data:
@@ -221,8 +223,17 @@ class PhotoScanner:
         """
         Convert GPS coordinates to human-readable location name (offline).
         Returns: "District, City, State, Country" or None if geocoder unavailable
+        
+        Only called when valid GPS coordinates exist.
         """
+        # Early return if geocoder not available
         if not GEOCODER_AVAILABLE:
+            return None
+        
+        # Validate coordinates (should already be validated by caller, but double-check)
+        if lat == 0.0 and lon == 0.0:
+            return None
+        if abs(lat) > 90 or abs(lon) > 180:
             return None
         
         try:
