@@ -5,6 +5,7 @@ from src.scanner import PhotoScanner
 from src.database import PhotoDatabase
 from src.model_handler import MobileCLIPHandler
 from src.metadata_scorer import score_batch_metadata
+from src.query_analyzer import QueryAnalyzer
 from search_config import SearchConfig
 # from ocr_config import OCRConfig
 import numpy as np
@@ -47,7 +48,20 @@ def main():
         # Load search configuration
         SearchConfig.validate()
         config = SearchConfig.get_config()
-        metadata_weight = config['metadata_weight']
+        
+        # ============================================================
+        # QUERY ANALYSIS - Determine intent and get dynamic weights
+        # ============================================================
+        print(f"\nAnalyzing query intent...")
+        analyzer = QueryAnalyzer(config['weight_presets'])
+        intent, weights, debug_info = analyzer.analyze_query(args.query)
+        
+        print(f"Query Intent: {intent.value.upper()}")
+        print(f"Weights: Visual={weights['visual']:.2f}, OCR={weights['ocr']:.2f}, Metadata={weights['metadata']:.2f}")
+        print(f"Analysis: {debug_info['reason']}")
+        
+        # Extract OCR tokens for enhanced matching
+        ocr_tokens = analyzer.get_ocr_tokens(args.query)
         
         # Batch Processing for efficient memory usage
         all_results = []
@@ -70,21 +84,54 @@ def main():
              # Vector Scores (Visual Similarity)
              vector_scores = np.dot(image_embs, text_emb)
              
-             # OCR Scores (Hybrid: Exact + Semantic Matching)
+             # ============================================================
+             # ENHANCED OCR SCORES (Token-based with fuzzy matching)
+             # ============================================================
              ocr_scores = np.zeros(count)
-             if has_text_query:
+             if has_text_query and len(ocr_tokens) > 0:
                  for i, text in enumerate(ocr_texts):
-                     if text and query_lower in text.lower():
-                         ocr_scores[i] = 1.0
+                     if not text:
+                         continue
+                     
+                     text_lower = text.lower()
+                     token_score = 0.0
+                     
+                     # Token-based scoring
+                     for token in ocr_tokens:
+                         if len(token) < config['ocr_min_token_length']:
+                             continue
+                         
+                         # Exact word match (highest score)
+                         if f" {token} " in f" {text_lower} ":
+                             token_score += config['ocr_exact_match_score']
+                         # Partial/fuzzy match (medium score)
+                         elif token in text_lower:
+                             token_score += config['ocr_partial_match_score']
+                         # Check if OCR contains similar words
+                         else:
+                             # Simple fuzzy matching - check if token is a substring of any OCR word
+                             ocr_words = text_lower.split()
+                             for ocr_word in ocr_words:
+                                 if len(ocr_word) >= config['ocr_min_token_length']:
+                                     # Check similarity (substring match)
+                                     if token in ocr_word or ocr_word in token:
+                                         if abs(len(token) - len(ocr_word)) <= 2:  # Similar length
+                                             token_score += config['ocr_token_base_score']
+                                             break
+                     
+                     ocr_scores[i] = min(token_score, 3.0)  # Cap max OCR score
              
              # Metadata Scores (Location, Date, Device, Camera, etc.)
              metadata_scores, metadata_reasons = score_batch_metadata(args.query, metadata_list)
              metadata_scores = np.array(metadata_scores)
              
+             # ============================================================
+             # DYNAMIC WEIGHTED SCORING (replaces simple addition)
+             # ============================================================
              final_batch_scores = (
-                 vector_scores * 1.0 +                    # Visual similarity (PRIMARY)
-                 ocr_scores +               # OCR boost (ADAPTIVE)
-                 metadata_scores * metadata_weight        # Metadata boost (CONFIGURABLE)
+                 vector_scores * weights['visual'] +
+                 ocr_scores * weights['ocr'] +
+                 metadata_scores * weights['metadata']
              )
              
              # Collect relevant results
@@ -158,10 +205,15 @@ def main():
         with open("search_results.log", "w", encoding="utf-8") as log:
             log.write("Search Results:\n")
             log.write(f"Query: '{args.query}'\n")
+            log.write(f"Query Intent: {intent.value.upper()}\n")
+            log.write(f"Dynamic Weights: Visual={weights['visual']:.2f}, OCR={weights['ocr']:.2f}, Metadata={weights['metadata']:.2f}\n")
+            log.write(f"Analysis: {debug_info['reason']}\n")
             log.write(f"Total images found: {len(top_results)}\n")
             log.write("="*80 + "\n\n")
             
             print("\nTop Matches:")
+            print("="*80)
+            print(f"Intent: {intent.value.upper()} | Weights: V={weights['visual']:.2f} O={weights['ocr']:.2f} M={weights['metadata']:.2f}")
             print("="*80)
             
             for idx, res in enumerate(top_results, 1):

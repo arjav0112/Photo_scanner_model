@@ -190,13 +190,25 @@ class PhotoScanner:
                             if 'GPSAltitude' in gps_data:
                                 altitude = float(gps_data['GPSAltitude'])
                                 meta['gps_altitude'] = f"{altitude:.1f}m"
+                                meta['altitude'] = altitude  # Add numeric altitude for scoring
                             
                             # GPS Timestamp
                             if 'GPSDateStamp' in gps_data and 'GPSTimeStamp' in gps_data:
                                 gps_date = gps_data['GPSDateStamp']
                                 gps_time = gps_data['GPSTimeStamp']
                                 meta['gps_timestamp'] = f"{gps_date} {gps_time[0]}:{gps_time[1]}:{gps_time[2]}"
-                
+            
+                # Create combined 'device' field for metadata scorer compatibility
+                if 'device_make' in meta or 'device_model' in meta:
+                    make = meta.get('device_make', '')
+                    model = meta.get('device_model', '')
+                    if make and model:
+                        meta['device'] = f"{make} {model}"
+                    elif make:
+                        meta['device'] = make
+                    elif model:
+                        meta['device'] = model
+            
         except Exception as e:
             # Silently fail but log if needed
             pass

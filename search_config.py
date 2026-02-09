@@ -34,13 +34,32 @@ class SearchConfig:
     MAX_RESULTS = 50
     
     # Metadata Weight: Controls how much metadata matching contributes to final score
-    # - Visual similarity and OCR have weight 1.0 each
-    # - Metadata weight determines relative importance of metadata matches
-    # - Lower values (0.3-0.5): Metadata is a tiebreaker
-    # - Medium values (0.5-0.8): Metadata significantly boosts relevant images
-    # - Higher values (0.8-1.5): Metadata can override visual similarity
+    # NOTE: This is deprecated in favor of dynamic weights from query_analyzer
+    # Kept for backward compatibility
     # Recommended range: 0.3 to 1.0
     METADATA_WEIGHT = 0.5
+    
+    # ========== DYNAMIC WEIGHT CONFIGURATION ==========
+    
+    # Weight presets for different query intents
+    # These can be adjusted based on user feedback
+    WEIGHT_PRESETS = {
+        'metadata_dominant': {'visual': 0.2, 'ocr': 0.1, 'metadata': 0.7},
+        'visual_dominant': {'visual': 0.8, 'ocr': 0.1, 'metadata': 0.1},
+        'text_dominant': {'visual': 0.2, 'ocr': 0.7, 'metadata': 0.1},
+        'hybrid_balanced': {'visual': 0.5, 'ocr': 0.3, 'metadata': 0.2},
+        'fallback': {'visual': 0.7, 'ocr': 0.2, 'metadata': 0.1},  # Visual-heavy default
+    }
+    
+    # ========== OCR CONFIGURATION ==========
+    
+    # Minimum token length for OCR matching (avoid matching very short words)
+    OCR_MIN_TOKEN_LENGTH = 3
+    
+    # OCR matching scores
+    OCR_EXACT_MATCH_SCORE = 1.0      # Full word exact match
+    OCR_PARTIAL_MATCH_SCORE = 0.6    # Partial/fuzzy match
+    OCR_TOKEN_BASE_SCORE = 0.3       # Base score per matching token
     
     # ========== EXAMPLES ==========
     """
@@ -83,7 +102,12 @@ class SearchConfig:
             'max_results': cls.MAX_RESULTS,
             'metadata_weight': cls.METADATA_WEIGHT,
             'enable_gap_detection': cls.ENABLE_GAP_DETECTION,
-            'gap_threshold': cls.GAP_THRESHOLD
+            'gap_threshold': cls.GAP_THRESHOLD,
+            'weight_presets': cls.WEIGHT_PRESETS,
+            'ocr_min_token_length': cls.OCR_MIN_TOKEN_LENGTH,
+            'ocr_exact_match_score': cls.OCR_EXACT_MATCH_SCORE,
+            'ocr_partial_match_score': cls.OCR_PARTIAL_MATCH_SCORE,
+            'ocr_token_base_score': cls.OCR_TOKEN_BASE_SCORE,
         }
     
     @classmethod
