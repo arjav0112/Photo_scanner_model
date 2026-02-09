@@ -61,6 +61,23 @@ class SearchConfig:
     OCR_PARTIAL_MATCH_SCORE = 0.6    # Partial/fuzzy match
     OCR_TOKEN_BASE_SCORE = 0.3       # Base score per matching token
     
+    # ========== ADAPTIVE LEARNING CONFIGURATION ==========
+    
+    # Enable/disable adaptive learning from user feedback
+    ENABLE_ADAPTIVE_LEARNING = True
+    
+    # Learning parameters (more aggressive for faster adaptation)
+    LEARNING_RATE = 0.25  # Faster adaptation (was 0.15)
+    MIN_FEEDBACK_SAMPLES = 5  # Learn from fewer samples (was 10)
+    MIN_SUCCESS_RATE = 0.2  # Lower threshold (was 0.3)
+    MAX_WEIGHT_ADJUSTMENT = 0.15  # Allow bigger changes (was 0.1)
+    
+    # Result-level penalties
+    ENABLE_RESULT_PENALTIES = True  # Penalize frequently disliked results
+    
+    # Feedback database path
+    FEEDBACK_DB_PATH = "feedback.db"
+    
     # ========== EXAMPLES ==========
     """
     Example configurations for different use cases:
@@ -108,6 +125,13 @@ class SearchConfig:
             'ocr_exact_match_score': cls.OCR_EXACT_MATCH_SCORE,
             'ocr_partial_match_score': cls.OCR_PARTIAL_MATCH_SCORE,
             'ocr_token_base_score': cls.OCR_TOKEN_BASE_SCORE,
+            'enable_adaptive_learning': cls.ENABLE_ADAPTIVE_LEARNING,
+            'learning_rate': cls.LEARNING_RATE,
+            'min_feedback_samples': cls.MIN_FEEDBACK_SAMPLES,
+            'min_success_rate': cls.MIN_SUCCESS_RATE,
+            'max_weight_adjustment': cls.MAX_WEIGHT_ADJUSTMENT,
+            'feedback_db_path': cls.FEEDBACK_DB_PATH,
+            'enable_result_penalties': cls.ENABLE_RESULT_PENALTIES,
         }
     
     @classmethod

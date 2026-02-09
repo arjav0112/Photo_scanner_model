@@ -83,14 +83,27 @@ class QueryAnalyzer:
         'error', 'notification', 'alert', 'warning',
     }
     
-    def __init__(self, config: Dict = None):
+    def __init__(self, config: Dict = None, use_adaptive_weights: bool = True):
         """
         Initialize query analyzer
         
         Args:
             config: Configuration dictionary with weight presets
+            use_adaptive_weights: Load learned weights from feedback
         """
         self.config = config or self._get_default_config()
+        self.use_adaptive = use_adaptive_weights
+        
+        # Load learned weights if adaptive learning is enabled
+        if self.use_adaptive:
+            try:
+                learned_config = self._load_learned_weights()
+                if learned_config:
+                    # Merge learned weights into config
+                    self.config.update(learned_config)
+            except Exception as e:
+                # Silently fail if learning not available yet
+                pass
     
     def _get_default_config(self) -> Dict:
         """Get default weight configuration"""
@@ -101,6 +114,47 @@ class QueryAnalyzer:
             'hybrid_balanced': {'visual': 0.5, 'ocr': 0.3, 'metadata': 0.2},
             'fallback': {'visual': 0.7, 'ocr': 0.2, 'metadata': 0.1},  # Visual-heavy default
         }
+    
+    def _load_learned_weights(self) -> Dict:
+        """
+        Load learned weights from feedback database
+        
+        Returns:
+            Dict with learned weight presets or empty dict
+        """
+        try:
+            from src.feedback_handler import FeedbackHandler
+            from src.learning_engine import LearningEngine
+            from search_config import SearchConfig
+            
+            config = SearchConfig.get_config()
+            
+            # Check if adaptive learning is enabled
+            if not config.get('enable_adaptive_learning', False):
+                return {}
+            
+            # Initialize feedback handler and learning engine
+            handler = FeedbackHandler(config.get('feedback_db_path', 'feedback.db'))
+            engine = LearningEngine(
+                handler,
+                learning_rate=config.get('learning_rate', 0.15),
+                min_samples=config.get('min_feedback_samples', 10),
+                min_success_rate=config.get('min_success_rate', 0.3),
+                max_adjustment=config.get('max_weight_adjustment', 0.1)
+            )
+            
+            # Get current presets and update with learned weights
+            current_presets = config.get('weight_presets', self._get_default_config())
+            updated_presets = engine.update_weights(current_presets, verbose=False)
+            
+            return updated_presets
+            
+        except ImportError:
+            # Modules not available yet
+            return {}
+        except Exception:
+            # Any other error, use defaults
+            return {}
     
     def analyze_query(self, query: str) -> Tuple[QueryIntent, Dict[str, float], Dict]:
         """
@@ -221,22 +275,35 @@ class QueryAnalyzer:
     
     def get_ocr_tokens(self, query: str) -> List[str]:
         """
-        Extract tokens from query for OCR matching
+        Extract meaningful tokens from query for OCR matching
+        Filters out stop words and common filler terms
         
         Args:
             query: Search query
-        
+            
         Returns:
-            List of tokens for OCR matching
+            List of meaningful tokens for OCR matching
         """
-        # Remove common stop words for better OCR matching
-        stop_words = {'a', 'an', 'the', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
-                      'by', 'from', 'as', 'is', 'was', 'are', 'were', 'be', 'been'}
+        # Common stop words to exclude from OCR matching
+        stop_words = {
+            'a', 'an', 'the', 'and', 'or', 'but', 'of', 'at', 'by', 'for', 'with',
+            'about', 'as', 'into', 'through', 'during', 'before', 'after',
+            'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off',
+            'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there',
+            'when', 'where', 'why', 'how', 'all', 'both', 'each', 'few', 'more',
+            'most', 'other', 'some', 'such', 'only', 'own', 'same', 'so',
+            'than', 'too', 'very', 'can', 'will', 'just', 'should', 'now',
+            # Photography-specific filler words
+            'photo', 'photos', 'picture', 'pictures', 'image', 'images',
+            'taken', 'shot', 'showing', 'show', 'display'
+        }
         
+        # Tokenize and filter
         tokens = query.lower().split()
-        
-        # Filter out stop words and very short tokens
-        meaningful_tokens = [t for t in tokens if len(t) > 2 and t not in stop_words]
+        meaningful_tokens = [
+            token for token in tokens 
+            if token not in stop_words and len(token) >= 3
+        ]
         
         return meaningful_tokens if meaningful_tokens else tokens
 

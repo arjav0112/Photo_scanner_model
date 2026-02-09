@@ -7,7 +7,6 @@ from src.model_handler import MobileCLIPHandler
 from src.metadata_scorer import score_batch_metadata
 from src.query_analyzer import QueryAnalyzer
 from search_config import SearchConfig
-# from ocr_config import OCRConfig
 import numpy as np
 
 def main():
@@ -155,6 +154,23 @@ def main():
         all_results.sort(key=lambda x: x["score"], reverse=True)
         
         # ============================================================
+        # APPLY RESULT-LEVEL PENALTIES (Immediate Feedback Impact)
+        # ============================================================
+        if config.get('enable_result_penalties', True):
+            from src.feedback_handler import FeedbackHandler
+            feedback_handler = FeedbackHandler(config.get('feedback_db_path', 'feedback.db'))
+            
+            for result in all_results:
+                penalty = feedback_handler.get_result_penalty(result['path'], args.query)
+                if penalty < 1.0:
+                    result['original_score'] = result['score']
+                    result['score'] *= penalty
+                    result['penalty'] = penalty
+        
+        # Re-sort after applying penalties
+        all_results.sort(key=lambda x: x["score"], reverse=True)
+        
+        # ============================================================
         # ADAPTIVE THRESHOLD FILTERING
         # Only show images with scores close to the top score
         # ============================================================
@@ -228,8 +244,16 @@ def main():
                 
                 match_type = " + ".join(match_components) if match_components else "Visual"
                 
+                # Check if result was penalized or boosted
+                feedback_info = ""
+                if 'penalty' in res:
+                    if res['penalty'] > 1.0:
+                        feedback_info = f" (✨ Boosted {int((res['penalty'] - 1.0) * 100)}% due to positive feedback)"
+                    elif res['penalty'] < 1.0:
+                        feedback_info = f" (⚠ Downranked {int((1 - res['penalty']) * 100)}% due to negative feedback)"
+                
                 # Format output
-                result_header = f"\n[{idx}] Score: {res['score']:.4f} ({match_type})"
+                result_header = f"\n[{idx}] Score: {res['score']:.4f} ({match_type}){feedback_info}"
                 result_file = f"    File: {res['path']}"
                 
                 # Score breakdown
@@ -258,6 +282,137 @@ def main():
             
             print("="*80)
             print(f"\nResults saved to: search_results.log")
+            
+            # ============================================================
+            # INTERACTIVE FEEDBACK COLLECTION
+            # ============================================================
+            if len(top_results) > 0:
+                print("\n" + "="*80)
+                print("FEEDBACK MODE - Help improve search results!")
+                print("="*80)
+                print("Commands:")
+                print("  [1-9]  View image (opens in default viewer)")
+                print("  [y]    Mark last viewed result as helpful")
+                print("  [n]    Mark last viewed result as not helpful")
+                print("  [s]    Show feedback statistics")
+                print("  [q]    Quit without more feedback")
+                print("="*80)
+                
+                from src.feedback_handler import FeedbackHandler, FeedbackType
+                import subprocess
+                import sys
+                
+                feedback_handler = FeedbackHandler(config.get('feedback_db_path', 'feedback.db'))
+                last_viewed_idx = None
+                
+                while True:
+                    try:
+                        user_input = input("\nYour choice: ").strip().lower()
+                        
+                        if user_input == 'q':
+                            print("Thanks for your feedback!")
+                            break
+                        
+                        elif user_input == 's':
+                            # Show statistics
+                            stats = feedback_handler.get_feedback_stats()
+                            print(f"\n--- Feedback Statistics ---")
+                            print(f"Total feedback: {stats['total_feedback']}")
+                            if stats['by_intent']:
+                                print(f"By intent: {stats['by_intent']}")
+                            if stats['by_type']:
+                                print(f"By type: {stats['by_type']}")
+                            print("---------------------------")
+                        
+                        elif user_input.isdigit():
+                            idx = int(user_input) - 1
+                            if 0 <= idx < len(top_results):
+                                result = top_results[idx]
+                                print(f"\nOpening: {result['path']}")
+                                
+                                # Open image in default viewer
+                                try:
+                                    if sys.platform == 'win32':
+                                        os.startfile(result['path'])
+                                    elif sys.platform == 'darwin':
+                                        subprocess.run(['open', result['path']])
+                                    else:
+                                        subprocess.run(['xdg-open', result['path']])
+                                    
+                                    # Record implicit positive feedback (clicked)
+                                    feedback_handler.record_feedback(
+                                        query=args.query,
+                                        query_intent=intent.value.upper(),
+                                        weights_used=weights,
+                                        result_path=result['path'],
+                                        result_rank=idx + 1,
+                                        result_scores={
+                                            'visual': float(result['v_score']),
+                                            'ocr': float(result['o_score']),
+                                            'metadata': float(result['m_score']),
+                                            'final': float(result['score'])
+                                        },
+                                        feedback_type=FeedbackType.CLICKED
+                                    )
+                                    
+                                    last_viewed_idx = idx
+                                    print("✓ Feedback recorded (CLICKED)")
+                                    
+                                except Exception as e:
+                                    print(f"Error opening image: {e}")
+                            else:
+                                print(f"Invalid number. Choose 1-{len(top_results)}")
+                        
+                        elif user_input == 'y':
+                            if last_viewed_idx is not None:
+                                result = top_results[last_viewed_idx]
+                                feedback_handler.record_feedback(
+                                    query=args.query,
+                                    query_intent=intent.value.upper(),
+                                    weights_used=weights,
+                                    result_path=result['path'],
+                                    result_rank=last_viewed_idx + 1,
+                                    result_scores={
+                                        'visual': float(result['v_score']),
+                                        'ocr': float(result['o_score']),
+                                        'metadata': float(result['m_score']),
+                                        'final': float(result['score'])
+                                    },
+                                    feedback_type=FeedbackType.POSITIVE
+                                )
+                                print("✓ Marked as HELPFUL - thanks!")
+                            else:
+                                print("Please view an image first (use 1-9)")
+                        
+                        elif user_input == 'n':
+                            if last_viewed_idx is not None:
+                                result = top_results[last_viewed_idx]
+                                feedback_handler.record_feedback(
+                                    query=args.query,
+                                    query_intent=intent.value.upper(),
+                                    weights_used=weights,
+                                    result_path=result['path'],
+                                    result_rank=last_viewed_idx + 1,
+                                    result_scores={
+                                        'visual': float(result['v_score']),
+                                        'ocr': float(result['o_score']),
+                                        'metadata': float(result['m_score']),
+                                        'final': float(result['score'])
+                                    },
+                                    feedback_type=FeedbackType.NEGATIVE
+                                )
+                                print("✓ Marked as NOT HELPFUL - we'll learn from this!")
+                            else:
+                                print("Please view an image first (use 1-9)")
+                        
+                        else:
+                            print("Invalid command. Use: 1-9, y, n, s, or q")
+                    
+                    except KeyboardInterrupt:
+                        print("\n\nExiting feedback mode...")
+                        break
+                    except Exception as e:
+                        print(f"Error: {e}")
     
     else:
         parser.print_help()
