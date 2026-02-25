@@ -37,76 +37,160 @@ class PhotoScanner:
         self.valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
 
     def scan_directory(self, directory: str):
-        """Recursively scans a directory for photos."""
+        """Recursively scans a directory for photos with incremental indexing."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        scan_start = time.time()
         print(f"Scanning directory: {directory}")
         
-        # Get set of already scanned paths
-        scanned_paths = self.db.get_scanned_paths()
+        # ============================================================
+        # INCREMENTAL SCANNING - Detect new, modified, and deleted files
+        # ============================================================
+        scanned_data = self.db.get_scanned_paths_with_mtime()  # {path: (mtime, size)}
         
-        # Collect new files
-        new_files = []
+        # Collect all files currently on disk
+        disk_files = {}
         for root, _, files in os.walk(directory):
             for file in files:
                 if os.path.splitext(file)[1].lower() in self.valid_extensions:
                     full_path = os.path.abspath(os.path.join(root, file))
-                    if full_path not in scanned_paths:
-                        new_files.append(full_path)
+                    try:
+                        stat = os.stat(full_path)
+                        disk_files[full_path] = (stat.st_mtime, stat.st_size)
+                    except OSError:
+                        continue
         
-        if not new_files:
-            print("No new photos found.")
+        # Categorize files
+        new_files = []
+        modified_files = []
+        
+        for path, (mtime, size) in disk_files.items():
+            if path not in scanned_data:
+                new_files.append(path)
+            else:
+                old_mtime, old_size = scanned_data[path]
+                if abs(mtime - old_mtime) > 1.0 or size != old_size:
+                    modified_files.append(path)
+        
+        # Detect deleted files
+        deleted_files = [p for p in scanned_data if p not in disk_files]
+        
+        # Remove deleted files from DB
+        if deleted_files:
+            self.db.remove_photos(deleted_files)
+        
+        files_to_process = new_files + modified_files
+        
+        if not files_to_process and not deleted_files:
+            print("No new or modified photos found.")
             return
-
-        print(f"Found {len(new_files)} new photos. Processing in batches...")
         
-        batch_size = 16 # Adjust based on RAM
+        print(f"Scan Summary:")
+        print(f"   New files: {len(new_files)}")
+        print(f"   Modified files: {len(modified_files)}")
+        print(f"   Deleted files: {len(deleted_files)}")
+        print(f"   Total to process: {len(files_to_process)}")
         
-        # Generator for batches
+        if not files_to_process:
+            self._rebuild_faiss_index()
+            return
+        
+        batch_size = 16
+        modified_set = set(modified_files)
+        
         def chunked(l, n):
             for i in range(0, len(l), n):
                 yield l[i:i + n]
 
-        for batch_idx, batch_paths in enumerate(tqdm(chunked(new_files, batch_size), total=len(new_files)//batch_size + 1, desc="Scanning Batches")):
+        for batch_idx, batch_paths in enumerate(tqdm(chunked(files_to_process, batch_size), total=len(files_to_process)//batch_size + 1, desc="Scanning Batches")):
             try:
-                if batch_idx % 5 == 0: # Log every 5 batches
+                if batch_idx % 5 == 0:
                      self.model.log_memory(f"Scanning Batch {batch_idx}")
                      
-                # 1. Batch Embeddings (The Slow Part Optimized)
+                # 1. Batch Embeddings (GPU-bound, stays serial)
                 embeddings = self.model.get_image_embeddings_batch(batch_paths)
                 
                 if embeddings is None:
                     continue
                 
-                # Process each result in batch
+                # 2. PARALLEL metadata + OCR extraction (I/O-bound)
+                metadata_results = {}
+                ocr_results = {}
+                
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    # Submit metadata extraction tasks
+                    meta_futures = {
+                        executor.submit(self._extract_metadata, path): path 
+                        for path in batch_paths
+                    }
+                    
+                    # Submit OCR tasks for document-like images
+                    ocr_futures = {}
+                    for i, path in enumerate(batch_paths):
+                        embedding = embeddings[i]
+                        if np.all(embedding == 0):
+                            continue
+                        emb_norm = embedding / np.linalg.norm(embedding)
+                        sim_score = np.dot(emb_norm, self.doc_embedding)
+                        if sim_score > self.doc_threshold:
+                            future = executor.submit(self.ocr.extract_text, path)
+                            ocr_futures[future] = path
+                    
+                    # Collect metadata results
+                    for future in as_completed(meta_futures):
+                        path = meta_futures[future]
+                        try:
+                            metadata_results[path] = future.result()
+                        except Exception:
+                            metadata_results[path] = {}
+                    
+                    # Collect OCR results
+                    for future in as_completed(ocr_futures):
+                        path = ocr_futures[future]
+                        try:
+                            ocr_results[path] = future.result()
+                        except Exception:
+                            ocr_results[path] = ""
+                
+                # 3. Save to database
                 for i, path in enumerate(batch_paths):
                     embedding = embeddings[i]
-                    # Skip flat zero embeddings (failed loads)
                     if np.all(embedding == 0):
                         continue
-                        
-                    # Normalize
-                    emb_norm = embedding / np.linalg.norm(embedding)
                     
-                    # 2. Gatekeeper
-                    sim_score = np.dot(emb_norm, self.doc_embedding)
+                    metadata = metadata_results.get(path, {})
+                    ocr_text = ocr_results.get(path, "")
                     
-                    ocr_text = ""
-                    if sim_score > self.doc_threshold:
-                         # Keep visual feedback clean
-                         # tqdm.write(f"[DOC] {os.path.basename(path)}") 
-                         ocr_text = self.ocr.extract_text(path)
-                    
-                    # 3. Metadata
-                    metadata = self._extract_metadata(path)
-                    
-                    # 4. Save
                     try:
                         stat = os.stat(path)
-                        self.db.add_photo(path, stat.st_size, stat.st_mtime, embedding, metadata, ocr_text)
+                        if path in modified_set:
+                            self.db.update_photo(path, stat.st_size, stat.st_mtime, embedding, metadata, ocr_text)
+                        else:
+                            self.db.add_photo(path, stat.st_size, stat.st_mtime, embedding, metadata, ocr_text)
                     except Exception as e:
                         print(f"DB Error {path}: {e}")
-                        
+                    
             except Exception as e:
                 print(f"Batch Error: {e}")
+        
+        # Rebuild FAISS index after scan
+        self._rebuild_faiss_index()
+        
+        elapsed = time.time() - scan_start
+        print(f"\nScan completed in {elapsed:.1f}s")
+    
+    def _rebuild_faiss_index(self):
+        """Rebuild FAISS index after scan changes."""
+        try:
+            from .faiss_index import FAISSIndex
+            faiss_idx = FAISSIndex()
+            ids, embeddings = self.db.get_all_embeddings_with_ids()
+            if len(ids) > 0:
+                faiss_idx.build_index(ids, embeddings)
+                faiss_idx.save()
+                print("FAISS search index rebuilt")
+        except Exception as e:
+            print(f"FAISS index rebuild failed: {e}")
 
     def _extract_metadata(self, image_path: str) -> dict:
         """Extracts comprehensive metadata including GPS, device info, and camera settings."""
@@ -180,7 +264,6 @@ class PhotoScanner:
                                 meta['location'] = f"{lat:.6f}, {lon:.6f}"
                                 
                                 # Resolve location name offline (only if valid coordinates)
-                                # Skip if coordinates are (0,0) or invalid
                                 if lat != 0.0 and lon != 0.0 and abs(lat) <= 90 and abs(lon) <= 180:
                                     location_name = self._resolve_location_name(lat, lon)
                                     if location_name:
@@ -242,7 +325,7 @@ class PhotoScanner:
         if not GEOCODER_AVAILABLE:
             return None
         
-        # Validate coordinates (should already be validated by caller, but double-check)
+        # Validate coordinates
         if lat == 0.0 and lon == 0.0:
             return None
         if abs(lat) > 90 or abs(lon) > 180:

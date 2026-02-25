@@ -176,6 +176,140 @@ class PhotoDatabase:
             yield paths, np.vstack(embeddings).astype(np.float32), ocr_texts, metadata_list
             
         conn.close()
+    
+    # ================================================================
+    # FAISS Integration Methods
+    # ================================================================
+    
+    def get_all_embeddings_with_ids(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Retrieve all (id, embedding) pairs for FAISS index building.
+        
+        Returns:
+            (ids, embeddings): numpy arrays
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, embedding FROM photos WHERE embedding IS NOT NULL")
+        
+        ids = []
+        embeddings = []
+        
+        for row in cursor.fetchall():
+            row_id, blob = row
+            emb = np.frombuffer(blob, dtype=np.float32)
+            ids.append(row_id)
+            embeddings.append(emb)
+        
+        conn.close()
+        
+        if not embeddings:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.float32)
+        
+        return np.array(ids, dtype=np.int64), np.vstack(embeddings).astype(np.float32)
+    
+    def get_batch_by_ids(self, ids: list) -> list:
+        """
+        Retrieve photo data for specific database IDs (post-FAISS search).
+        
+        Args:
+            ids: List of database row IDs
+            
+        Returns:
+            List of dicts with path, ocr_text, metadata for each ID
+        """
+        if len(ids) == 0:
+            return []
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        placeholders = ','.join('?' * len(ids))
+        cursor.execute(f'''
+        SELECT id, path, ocr_text, metadata 
+        FROM photos 
+        WHERE id IN ({placeholders})
+        ''', list(ids))
+        
+        # Build result map keyed by ID for ordering
+        result_map = {}
+        for row in cursor.fetchall():
+            row_id, path, ocr_text, metadata_json = row
+            try:
+                metadata = json.loads(metadata_json) if metadata_json else {}
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+            
+            result_map[row_id] = {
+                'id': row_id,
+                'path': path,
+                'ocr_text': ocr_text or '',
+                'metadata': metadata
+            }
+        
+        conn.close()
+        
+        # Return in same order as input IDs
+        return [result_map[i] for i in ids if i in result_map]
+    
+    def get_photo_count(self) -> int:
+        """Get total number of photos with embeddings."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM photos WHERE embedding IS NOT NULL")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    # ================================================================
+    # Incremental Scanning Methods
+    # ================================================================
+    
+    def get_scanned_paths_with_mtime(self) -> dict:
+        """
+        Returns dict of {path: (modified_time, size_bytes)} for change detection.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT path, modified_time, size_bytes FROM photos")
+        result = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+        conn.close()
+        return result
+    
+    def update_photo(self, path: str, size: int, mtime: float, embedding: np.ndarray, metadata: dict = None, ocr_text: str = ""):
+        """Update an existing photo entry (for incremental re-scanning)."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        embedding_blob = embedding.astype(np.float32).tobytes()
+        metadata_json = json.dumps(metadata) if metadata else "{}"
+        
+        cursor.execute('''
+        UPDATE photos 
+        SET size_bytes=?, modified_time=?, embedding=?, metadata=?, ocr_text=?
+        WHERE path=?
+        ''', (size, mtime, embedding_blob, metadata_json, ocr_text, path))
+        
+        conn.commit()
+        conn.close()
+    
+    def remove_photos(self, paths: list):
+        """Remove photos that no longer exist on disk."""
+        if not paths:
+            return
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        placeholders = ','.join('?' * len(paths))
+        cursor.execute(f"DELETE FROM photos WHERE path IN ({placeholders})", paths)
+        
+        conn.commit()
+        deleted = cursor.rowcount
+        conn.close()
+        
+        if deleted > 0:
+            print(f"Removed {deleted} deleted files from database")
 
 if __name__ == "__main__":
     db = PhotoDatabase()

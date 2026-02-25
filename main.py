@@ -31,18 +31,16 @@ def main():
         print("Scan complete.")
         
     elif args.command == "search":
-        print(f"Loading AI Model for Search...")
-        # Initialize robust SentenceTransformer model
-        handler = MobileCLIPHandler()
-        
-        print(f"Generating embedding for query: '{args.query}'")
-        text_emb = handler.get_text_embedding(args.query)
-        
-        # Normalize text embedding
-        text_emb = text_emb / np.linalg.norm(text_emb)
+        import time as _time
+        search_start = _time.time()
         
         print("Loading database...")
         db = PhotoDatabase()
+        
+        total_images = db.get_photo_count()
+        if total_images == 0:
+            print("No images found in database. Run 'scan' first.")
+            return
         
         # Load search configuration
         SearchConfig.validate()
@@ -62,96 +60,115 @@ def main():
         # Extract OCR tokens for enhanced matching
         ocr_tokens = analyzer.get_ocr_tokens(args.query)
         
-        # Batch Processing for efficient memory usage
-        all_results = []
+        # ============================================================
+        # DISK-BASED EMBEDDING CACHE — check BEFORE loading model
+        # ============================================================
+        from src.search_cache import SearchCache
+        cache = SearchCache(max_entries=50, ttl_seconds=300)
         
-        batch_gen = db.get_search_data_generator(batch_size=2048) # Process in chunks
+        # Try disk cache first (no model needed!)
+        text_emb = cache.get_text_embedding(args.query)
         
+        if text_emb is not None:
+            print(f"Disk cache hit — skipped model loading!")
+            handler = None  # Model never loaded
+        else:
+            # Cache miss — must load model to encode new query
+            print(f"Loading AI Model for Search...")
+            handler = MobileCLIPHandler()
+            
+            print(f"Generating embedding for query: '{args.query}'")
+            text_emb = handler.get_text_embedding(args.query)
+            text_emb = text_emb / np.linalg.norm(text_emb)
+            cache.set_text_embedding(args.query, text_emb)
+        
+        # ============================================================
+        # FAISS SEARCH - Fast vector similarity (replaces np.dot loop)
+        # ============================================================
+        from src.faiss_index import FAISSIndex
+        
+        faiss_idx = FAISSIndex()
+        faiss_idx.load_or_build(db)
+        
+        # Get top candidates (only these get OCR/metadata scoring)
+        top_k = min(100, total_images)
+        candidate_ids, vector_scores = faiss_idx.search(text_emb, top_k=top_k)
+        
+        print(f"FAISS returned {len(candidate_ids)} candidates from {total_images} images")
+        
+        # ============================================================
+        # RETRIEVE CANDIDATE DATA (only top results, not all images)
+        # ============================================================
+        candidates = db.get_batch_by_ids(candidate_ids.tolist())
+        
+        # Map scores to candidates (maintain order)
         query_lower = args.query.lower()
         has_text_query = len(query_lower) > 2
         
-        total_images = 0
+        all_results = []
         
-        for paths, image_embs, ocr_texts, metadata_list in batch_gen:
-             count = len(paths)
-             total_images += count
-             
-             # Normalize image embeddings
-             norms = np.linalg.norm(image_embs, axis=1, keepdims=True)
-             image_embs = image_embs / (norms + 1e-8)
-             
-             # Vector Scores (Visual Similarity)
-             vector_scores = np.dot(image_embs, text_emb)
-             
-             # ============================================================
-             # ENHANCED OCR SCORES (Token-based with fuzzy matching)
-             # ============================================================
-             ocr_scores = np.zeros(count)
-             if has_text_query and len(ocr_tokens) > 0:
-                 for i, text in enumerate(ocr_texts):
-                     if not text:
-                         continue
-                     
-                     text_lower = text.lower()
-                     token_score = 0.0
-                     
-                     # Token-based scoring
-                     for token in ocr_tokens:
-                         if len(token) < config['ocr_min_token_length']:
-                             continue
-                         
-                         # Exact word match (highest score)
-                         if f" {token} " in f" {text_lower} ":
-                             token_score += config['ocr_exact_match_score']
-                         # Partial/fuzzy match (medium score)
-                         elif token in text_lower:
-                             token_score += config['ocr_partial_match_score']
-                         # Check if OCR contains similar words
-                         else:
-                             # Simple fuzzy matching - check if token is a substring of any OCR word
-                             ocr_words = text_lower.split()
-                             for ocr_word in ocr_words:
-                                 if len(ocr_word) >= config['ocr_min_token_length']:
-                                     # Check similarity (substring match)
-                                     if token in ocr_word or ocr_word in token:
-                                         if abs(len(token) - len(ocr_word)) <= 2:  # Similar length
-                                             token_score += config['ocr_token_base_score']
-                                             break
-                     
-                     ocr_scores[i] = min(token_score, 3.0)  # Cap max OCR score
-             
-             # Metadata Scores (Location, Date, Device, Camera, etc.)
-             metadata_scores, metadata_reasons = score_batch_metadata(args.query, metadata_list)
-             metadata_scores = np.array(metadata_scores)
-             
-             # ============================================================
-             # DYNAMIC WEIGHTED SCORING (replaces simple addition)
-             # ============================================================
-             final_batch_scores = (
-                 vector_scores * weights['visual'] +
-                 ocr_scores * weights['ocr'] +
-                 metadata_scores * weights['metadata']
-             )
-             
-             # Collect relevant results
-             for i in range(count):
-                 all_results.append({
-                     "path": paths[i],
-                     "score": final_batch_scores[i],
-                     "v_score": vector_scores[i],
-                     "o_score": ocr_scores[i],
-                     "m_score": metadata_scores[i],
-                     "m_reasons": metadata_reasons[i]
-                 })
-                 
-        if total_images == 0:
-            print("No images found in database. Run 'scan' first.")
-            return
-
-        print(f"Compared against {total_images} images (Batched).")
+        for i, candidate in enumerate(candidates):
+            v_score = float(vector_scores[i])
+            
+            # ============================================================
+            # OCR SCORING (only on FAISS candidates, not all images)
+            # ============================================================
+            o_score = 0.0
+            if has_text_query and len(ocr_tokens) > 0:
+                text = candidate['ocr_text']
+                if text:
+                    text_lower = text.lower()
+                    token_score = 0.0
+                    
+                    for token in ocr_tokens:
+                        if len(token) < config['ocr_min_token_length']:
+                            continue
+                        
+                        # Exact word match (highest score)
+                        if f" {token} " in f" {text_lower} ":
+                            token_score += config['ocr_exact_match_score']
+                        # Partial/fuzzy match (medium score)
+                        elif token in text_lower:
+                            token_score += config['ocr_partial_match_score']
+                        # Fuzzy matching
+                        else:
+                            ocr_words = text_lower.split()
+                            for ocr_word in ocr_words:
+                                if len(ocr_word) >= config['ocr_min_token_length']:
+                                    if token in ocr_word or ocr_word in token:
+                                        if abs(len(token) - len(ocr_word)) <= 2:
+                                            token_score += config['ocr_token_base_score']
+                                            break
+                    
+                    o_score = min(token_score, 3.0)
+            
+            # ============================================================
+            # METADATA SCORING (only on FAISS candidates)
+            # ============================================================
+            m_scores, m_reasons = score_batch_metadata(args.query, [candidate['metadata']])
+            m_score = m_scores[0]
+            m_reason = m_reasons[0]
+            
+            # Dynamic weighted scoring
+            final_score = (
+                v_score * weights['visual'] +
+                o_score * weights['ocr'] +
+                m_score * weights['metadata']
+            )
+            
+            all_results.append({
+                "path": candidate['path'],
+                "score": final_score,
+                "v_score": v_score,
+                "o_score": o_score,
+                "m_score": m_score,
+                "m_reasons": m_reason
+            })
         
-        # Sort results (highest similarity first)
+        # Sort results
         all_results.sort(key=lambda x: x["score"], reverse=True)
+        
+        print(f"Compared against {total_images} images (FAISS indexed).")
         
         # ============================================================
         # APPLY RESULT-LEVEL PENALTIES (Immediate Feedback Impact)
@@ -162,7 +179,7 @@ def main():
             
             for result in all_results:
                 penalty = feedback_handler.get_result_penalty(result['path'], args.query)
-                if penalty < 1.0:
+                if penalty != 1.0:
                     result['original_score'] = result['score']
                     result['score'] *= penalty
                     result['penalty'] = penalty
@@ -281,7 +298,9 @@ def main():
                 log.write("\n")
             
             print("="*80)
-            print(f"\nResults saved to: search_results.log")
+            search_elapsed = _time.time() - search_start
+            print(f"\nSearch completed in {search_elapsed:.2f}s")
+            print(f"Results saved to: search_results.log")
             
             # ============================================================
             # INTERACTIVE FEEDBACK COLLECTION
