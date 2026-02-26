@@ -83,6 +83,26 @@ class MetadataScorer:
         total_score += props_score
         match_reasons.extend(props_reasons)
         
+        # 7. Face detection scoring
+        face_score, face_reasons = self._score_faces(metadata)
+        total_score += face_score
+        match_reasons.extend(face_reasons)
+        
+        # 8. Scene classification scoring
+        scene_score, scene_reasons = self._score_scene(metadata)
+        total_score += scene_score
+        match_reasons.extend(scene_reasons)
+        
+        # 9. Color analysis scoring
+        color_score, color_reasons = self._score_color(metadata)
+        total_score += color_score
+        match_reasons.extend(color_reasons)
+        
+        # 10. Quality scoring
+        quality_score, quality_reasons = self._score_quality(metadata)
+        total_score += quality_score
+        match_reasons.extend(quality_reasons)
+        
         return total_score, match_reasons
     
     def _score_location(self, metadata: Dict) -> Tuple[float, List[str]]:
@@ -349,6 +369,184 @@ class MetadataScorer:
             
             except (ValueError, TypeError):
                 pass
+        
+        return score, reasons
+    
+    def _score_faces(self, metadata: Dict) -> Tuple[float, List[str]]:
+        """Score based on face/person detection metadata"""
+        score = 0.0
+        reasons = []
+        
+        face_count = metadata.get('face_count', 0)
+        face_category = metadata.get('face_category', 'no_faces')
+        has_faces = metadata.get('has_faces', False)
+        
+        # "photos with faces" / "people" queries
+        if any(w in self.query_lower for w in ['face', 'faces', 'people', 'person', 'someone']):
+            if has_faces:
+                score += 1.5
+                reasons.append(f"Has {face_count} person(s) detected")
+            else:
+                score -= 0.3  # Slight penalty for no faces when user wants faces
+        
+        # "selfie" / "portrait" queries
+        if any(w in self.query_lower for w in ['selfie', 'portrait']):
+            if face_category == 'portrait':
+                score += 1.5
+                reasons.append("Single person (portrait/selfie)")
+            elif face_category == 'duo':
+                score += 0.5
+        
+        # "group photo" / "group" queries
+        if any(w in self.query_lower for w in ['group', 'crowd', 'team', 'family']):
+            if face_category == 'group':
+                score += 1.5
+                reasons.append(f"Group photo ({face_count} people)")
+            elif face_category == 'duo':
+                score += 0.8
+                reasons.append("Duo photo (2 people)")
+        
+        # "no people" / "empty" queries
+        if any(w in self.query_lower for w in ['no people', 'empty', 'nobody', 'no person']):
+            if not has_faces:
+                score += 1.0
+                reasons.append("No people detected")
+        
+        return score, reasons
+    
+    def _score_scene(self, metadata: Dict) -> Tuple[float, List[str]]:
+        """Score based on scene classification metadata"""
+        score = 0.0
+        reasons = []
+        
+        scene_type = metadata.get('scene_type', 'unknown')
+        scene_env = metadata.get('scene_environment', 'unknown')
+        
+        if scene_type == 'unknown':
+            return score, reasons
+        
+        # Indoor/outdoor queries
+        if any(w in self.query_lower for w in ['outdoor', 'outside', 'open air']):
+            if scene_type == 'outdoor':
+                score += 1.5
+                reasons.append(f"Outdoor scene ({scene_env})")
+        
+        if any(w in self.query_lower for w in ['indoor', 'inside', 'room', 'interior']):
+            if scene_type == 'indoor':
+                score += 1.5
+                reasons.append("Indoor scene")
+        
+        # Nature queries
+        if any(w in self.query_lower for w in ['nature', 'natural', 'green', 'vegetation', 'forest', 'park', 'garden']):
+            if scene_env == 'natural':
+                score += 1.5
+                reasons.append("Natural environment")
+        
+        # Urban/city queries
+        if any(w in self.query_lower for w in ['urban', 'city', 'street', 'building', 'architecture']):
+            if scene_env == 'urban':
+                score += 1.5
+                reasons.append("Urban environment")
+        
+        # Sky queries
+        if any(w in self.query_lower for w in ['sky', 'clouds', 'sunset', 'sunrise']):
+            if scene_env == 'sky' or scene_type == 'outdoor':
+                score += 1.0
+                reasons.append("Sky visible")
+        
+        return score, reasons
+    
+    def _score_color(self, metadata: Dict) -> Tuple[float, List[str]]:
+        """Score based on color analysis metadata"""
+        score = 0.0
+        reasons = []
+        
+        dominant_colors = metadata.get('dominant_colors', [])
+        color_tone = metadata.get('color_tone', 'neutral')
+        color_vibrance = metadata.get('color_vibrance', 'moderate')
+        
+        if not dominant_colors:
+            return score, reasons
+        
+        # Warm/cool tone queries
+        if any(w in self.query_lower for w in ['warm tone', 'warm color', 'warm photo', 'warm']):
+            if color_tone == 'warm':
+                score += 1.5
+                reasons.append("Warm color tones")
+        
+        if any(w in self.query_lower for w in ['cool tone', 'cool color', 'cool photo', 'cool']):
+            if color_tone == 'cool':
+                score += 1.5
+                reasons.append("Cool color tones")
+        
+        # Vibrance queries
+        if any(w in self.query_lower for w in ['vibrant', 'colorful', 'saturated', 'vivid', 'bright color']):
+            if color_vibrance == 'vibrant':
+                score += 1.5
+                reasons.append("Vibrant colors")
+        
+        if any(w in self.query_lower for w in ['muted', 'subtle', 'desaturated', 'faded', 'pastel']):
+            if color_vibrance == 'muted':
+                score += 1.5
+                reasons.append("Muted colors")
+        
+        # Specific color queries
+        color_keywords = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'white', 'black', 'brown']
+        for color in color_keywords:
+            if color in self.query_lower and color in dominant_colors:
+                score += 1.2
+                reasons.append(f"Dominant color: {color}")
+                break  # Only match one specific color
+        
+        return score, reasons
+    
+    def _score_quality(self, metadata: Dict) -> Tuple[float, List[str]]:
+        """Score based on quality analysis metadata"""
+        score = 0.0
+        reasons = []
+        
+        quality_rating = metadata.get('quality_rating', 'unknown')
+        is_blurry = metadata.get('is_blurry', False)
+        exposure = metadata.get('exposure', 'unknown')
+        blur_score = metadata.get('blur_score', 0)
+        
+        # Blur queries
+        if any(w in self.query_lower for w in ['blurry', 'blur', 'out of focus', 'unfocused']):
+            if is_blurry:
+                score += 1.5
+                reasons.append(f"Blurry photo (score: {blur_score})")
+        
+        if any(w in self.query_lower for w in ['sharp', 'clear', 'focused', 'crisp', 'in focus']):
+            if not is_blurry and blur_score > 200:
+                score += 1.5
+                reasons.append(f"Sharp photo (score: {blur_score})")
+        
+        # Quality queries
+        if any(w in self.query_lower for w in ['high quality', 'best quality', 'excellent', 'best photos', 'good quality']):
+            if quality_rating in ('excellent', 'good'):
+                score += 1.5
+                reasons.append(f"Quality: {quality_rating}")
+        
+        if any(w in self.query_lower for w in ['low quality', 'bad quality', 'poor']):
+            if quality_rating == 'poor':
+                score += 1.0
+                reasons.append("Low quality photo")
+        
+        # Exposure queries
+        if any(w in self.query_lower for w in ['well exposed', 'good exposure', 'proper exposure']):
+            if exposure == 'well_exposed':
+                score += 1.0
+                reasons.append("Well exposed")
+        
+        if any(w in self.query_lower for w in ['overexposed', 'too bright', 'blown out']):
+            if exposure == 'overexposed':
+                score += 1.0
+                reasons.append("Overexposed")
+        
+        if any(w in self.query_lower for w in ['underexposed', 'too dark']):
+            if exposure in ('underexposed', 'dark'):
+                score += 1.0
+                reasons.append("Underexposed/dark")
         
         return score, reasons
 

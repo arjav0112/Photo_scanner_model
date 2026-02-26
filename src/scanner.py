@@ -26,6 +26,10 @@ class PhotoScanner:
         from .ocr_handler import OCRHandler
         self.ocr = OCRHandler()
         
+        # Initialize enhanced visual analyzer (faces, scene, color, quality)
+        from .image_analyzer import ImageAnalyzer
+        self.image_analyzer = ImageAnalyzer()
+        
         # Pre-compute document anchor embedding for Gatekeeper
         print("Initializing Gatekeeper (Document Detection)...")
         doc_text = "text document invoice receipt book page letter contract"
@@ -113,14 +117,21 @@ class PhotoScanner:
                 if embeddings is None:
                     continue
                 
-                # 2. PARALLEL metadata + OCR extraction (I/O-bound)
+                # 2. PARALLEL metadata + visual + OCR extraction (I/O-bound)
                 metadata_results = {}
+                visual_results = {}
                 ocr_results = {}
                 
                 with ThreadPoolExecutor(max_workers=4) as executor:
-                    # Submit metadata extraction tasks
+                    # Submit EXIF metadata extraction tasks
                     meta_futures = {
                         executor.submit(self._extract_metadata, path): path 
+                        for path in batch_paths
+                    }
+                    
+                    # Submit visual metadata extraction tasks (faces, scene, color, quality)
+                    visual_futures = {
+                        executor.submit(self.image_analyzer.analyze, path): path
                         for path in batch_paths
                     }
                     
@@ -136,13 +147,21 @@ class PhotoScanner:
                             future = executor.submit(self.ocr.extract_text, path)
                             ocr_futures[future] = path
                     
-                    # Collect metadata results
+                    # Collect EXIF metadata results
                     for future in as_completed(meta_futures):
                         path = meta_futures[future]
                         try:
                             metadata_results[path] = future.result()
                         except Exception:
                             metadata_results[path] = {}
+                    
+                    # Collect visual metadata results
+                    for future in as_completed(visual_futures):
+                        path = visual_futures[future]
+                        try:
+                            visual_results[path] = future.result()
+                        except Exception:
+                            visual_results[path] = {}
                     
                     # Collect OCR results
                     for future in as_completed(ocr_futures):
@@ -159,6 +178,9 @@ class PhotoScanner:
                         continue
                     
                     metadata = metadata_results.get(path, {})
+                    # Merge visual metadata (faces, scene, color, quality)
+                    visual_meta = visual_results.get(path, {})
+                    metadata.update(visual_meta)
                     ocr_text = ocr_results.get(path, "")
                     
                     try:

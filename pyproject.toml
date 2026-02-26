@@ -25,6 +25,8 @@ dependencies = [
     "psutil (>=7.2.2,<8.0.0)",
     "reverse-geocoder (>=1.5.1,<2.0.0)",
     "faiss-cpu (>=1.13.2,<2.0.0)",
+    "ultralytics (>=8.4.17,<9.0.0)",
+    "opencv-python (>=4.13.0.92,<5.0.0.0)",
 ]
 
 

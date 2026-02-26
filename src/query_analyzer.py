@@ -51,6 +51,23 @@ class QueryAnalyzer:
         
         # Altitude
         'altitude', 'elevation', 'mountain', 'hill', 'peak', 'summit', 'sea level',
+        
+        # Face/People detection
+        'face', 'faces', 'selfie', 'group', 'group photo', 'people',
+        'crowd', 'team', 'family', 'duo', 'nobody', 'no people',
+        
+        # Scene classification
+        'indoor', 'outdoor', 'outside', 'inside', 'room', 'interior',
+        'nature', 'natural', 'urban',
+        
+        # Color analysis
+        'warm', 'cool', 'vibrant', 'colorful', 'muted', 'saturated', 'vivid',
+        'faded', 'pastel', 'warm tone', 'cool tone',
+        
+        # Quality assessment
+        'sharp', 'blurry', 'blur', 'focused', 'crisp', 'clear',
+        'high quality', 'low quality', 'overexposed', 'underexposed',
+        'well exposed',
     }
     
     # Keywords that suggest visual content search
