@@ -35,7 +35,7 @@ class PhotoScanner:
         doc_text = "text document invoice receipt book page letter contract"
         self.doc_embedding = self.model.get_text_embedding(doc_text)
         self.doc_embedding /= np.linalg.norm(self.doc_embedding) # Normalize
-        self.doc_threshold = 0.17 # Lowered from 0.21 based on experimentation
+        self.doc_threshold = 0.21 # Balanced: catches documents, skips regular photos
 
         # Supported extensions
         self.valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
