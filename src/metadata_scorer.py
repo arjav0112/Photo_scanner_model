@@ -114,25 +114,22 @@ class MetadataScorer:
         if location_name:
             location_lower = location_name.lower()
             
-            # Check for location keywords in query
             location_keywords = ['delhi', 'india', 'pitampura', 'mumbai', 'bangalore', 
                                 'chennai', 'kolkata', 'hyderabad', 'pune', 'ahmedabad',
                                 'city', 'town', 'village', 'country', 'state']
             
             for keyword in location_keywords:
                 if keyword in self.query_lower and keyword in location_lower:
-                    score += 1.5  # Strong location match
+                    score += 1.5  
                     reasons.append(f"Location: {location_name}")
                     break
             
-            # Partial location match
             for token in self.query_tokens:
                 if len(token) > 3 and token in location_lower:
                     score += 1.0
                     reasons.append(f"Location contains: {token}")
                     break
         
-        # Check for GPS-related queries
         if metadata.get('gps_latitude') and metadata.get('gps_longitude'):
             if any(word in self.query_lower for word in ['gps', 'location', 'coordinates', 'map', 'place']):
                 score += 0.5
@@ -150,19 +147,16 @@ class MetadataScorer:
             return score, reasons
         
         try:
-            # Parse date: "2026:02:01 14:45:43"
             date_obj = datetime.strptime(date_taken, "%Y:%m:%d %H:%M:%S")
             
-            # Year matching
             year_str = str(date_obj.year)
             if year_str in self.query_lower:
                 score += 1.5
                 reasons.append(f"Year: {year_str}")
             
-            # Month matching (by name or number)
             month_num = date_obj.month
-            month_name = date_obj.strftime("%B").lower()  # "February"
-            month_short = date_obj.strftime("%b").lower()  # "Feb"
+            month_name = date_obj.strftime("%B").lower()  
+            month_short = date_obj.strftime("%b").lower()  
             
             for token in self.query_tokens:
                 if token in self.MONTHS and self.MONTHS[token] == month_num:
@@ -170,13 +164,11 @@ class MetadataScorer:
                     reasons.append(f"Month: {month_name.capitalize()}")
                     break
             
-            # Day matching
             day_str = str(date_obj.day)
             if day_str in self.query_tokens:
                 score += 0.5
                 reasons.append(f"Day: {day_str}")
             
-            # Time-based keywords
             hour = date_obj.hour
             if 'morning' in self.query_lower and 5 <= hour < 12:
                 score += 1.0
@@ -191,7 +183,6 @@ class MetadataScorer:
                 score += 1.0
                 reasons.append("Night photo")
             
-            # Recent/old keywords
             if 'recent' in self.query_lower or 'latest' in self.query_lower:
                 days_ago = (datetime.now() - date_obj).days
                 if days_ago < 7:
@@ -221,7 +212,6 @@ class MetadataScorer:
         if device:
             device_lower = device.lower()
             
-            # Brand matching
             brands = ['oneplus', 'samsung', 'apple', 'iphone', 'pixel', 'google', 
                      'xiaomi', 'oppo', 'vivo', 'realme', 'nokia', 'motorola',
                      'canon', 'nikon', 'sony', 'fujifilm', 'olympus']
@@ -232,7 +222,6 @@ class MetadataScorer:
                     reasons.append(f"Device: {device}")
                     break
             
-            # Generic device keywords
             if any(word in self.query_lower for word in ['phone', 'mobile', 'smartphone']):
                 if any(word in device_lower for word in ['oneplus', 'samsung', 'iphone', 'pixel']):
                     score += 0.8
@@ -250,9 +239,8 @@ class MetadataScorer:
         score = 0.0
         reasons = []
         
-        # ISO scoring
         iso = metadata.get('iso')
-        if iso:
+        if iso: 
             if 'low light' in self.query_lower or 'night' in self.query_lower or 'dark' in self.query_lower:
                 if iso >= 800:
                     score += 1.0
@@ -263,7 +251,6 @@ class MetadataScorer:
                     score += 0.8
                     reasons.append(f"Low ISO ({iso}) - Bright conditions")
         
-        # Aperture scoring
         aperture = metadata.get('aperture')
         if aperture:
             try:
@@ -281,7 +268,6 @@ class MetadataScorer:
             except (ValueError, AttributeError):
                 pass
         
-        # Flash scoring
         flash = metadata.get('flash', '')
         if flash:
             if 'flash' in self.query_lower:
@@ -306,7 +292,6 @@ class MetadataScorer:
             try:
                 alt_meters = float(altitude)
                 
-                # Mountain/hill keywords
                 if any(word in self.query_lower for word in ['mountain', 'hill', 'peak', 'summit', 'trek', 'hiking']):
                     if alt_meters > 1000:
                         score += 1.5
@@ -315,7 +300,6 @@ class MetadataScorer:
                         score += 1.0
                         reasons.append(f"Elevated ({alt_meters:.0f}m) - Hill")
                 
-                # Sea level / beach keywords
                 if any(word in self.query_lower for word in ['beach', 'sea', 'ocean', 'coast', 'shore']):
                     if alt_meters < 50:
                         score += 1.0
@@ -340,7 +324,6 @@ class MetadataScorer:
                 h = int(height)
                 megapixels = (w * h) / 1_000_000
                 
-                # Resolution keywords
                 if any(word in self.query_lower for word in ['high resolution', 'hd', 'quality', 'large']):
                     if megapixels > 8:
                         score += 0.8
@@ -351,7 +334,6 @@ class MetadataScorer:
                         score += 0.5
                         reasons.append(f"Low resolution ({megapixels:.1f}MP)")
                 
-                # Orientation keywords
                 if 'vertical' in self.query_lower or 'portrait' in self.query_lower:
                     if h > w:
                         score += 0.5
@@ -363,7 +345,7 @@ class MetadataScorer:
                         reasons.append("Horizontal orientation")
                 
                 if 'square' in self.query_lower:
-                    if abs(w - h) < min(w, h) * 0.1:  # Within 10% of square
+                    if abs(w - h) < min(w, h) * 0.1: 
                         score += 0.5
                         reasons.append("Square format")
             
@@ -381,15 +363,13 @@ class MetadataScorer:
         face_category = metadata.get('face_category', 'no_faces')
         has_faces = metadata.get('has_faces', False)
         
-        # "photos with faces" / "people" queries
         if any(w in self.query_lower for w in ['face', 'faces', 'people', 'person', 'someone']):
             if has_faces:
                 score += 1.5
                 reasons.append(f"Has {face_count} person(s) detected")
             else:
-                score -= 0.3  # Slight penalty for no faces when user wants faces
+                score -= 0.3 
         
-        # "selfie" / "portrait" queries
         if any(w in self.query_lower for w in ['selfie', 'portrait']):
             if face_category == 'portrait':
                 score += 1.5
@@ -397,7 +377,6 @@ class MetadataScorer:
             elif face_category == 'duo':
                 score += 0.5
         
-        # "group photo" / "group" queries
         if any(w in self.query_lower for w in ['group', 'crowd', 'team', 'family']):
             if face_category == 'group':
                 score += 1.5
@@ -406,7 +385,6 @@ class MetadataScorer:
                 score += 0.8
                 reasons.append("Duo photo (2 people)")
         
-        # "no people" / "empty" queries
         if any(w in self.query_lower for w in ['no people', 'empty', 'nobody', 'no person']):
             if not has_faces:
                 score += 1.0
@@ -425,7 +403,6 @@ class MetadataScorer:
         if scene_type == 'unknown':
             return score, reasons
         
-        # Indoor/outdoor queries
         if any(w in self.query_lower for w in ['outdoor', 'outside', 'open air']):
             if scene_type == 'outdoor':
                 score += 1.5
@@ -436,19 +413,16 @@ class MetadataScorer:
                 score += 1.5
                 reasons.append("Indoor scene")
         
-        # Nature queries
         if any(w in self.query_lower for w in ['nature', 'natural', 'green', 'vegetation', 'forest', 'park', 'garden']):
             if scene_env == 'natural':
                 score += 1.5
                 reasons.append("Natural environment")
         
-        # Urban/city queries
         if any(w in self.query_lower for w in ['urban', 'city', 'street', 'building', 'architecture']):
             if scene_env == 'urban':
                 score += 1.5
                 reasons.append("Urban environment")
         
-        # Sky queries
         if any(w in self.query_lower for w in ['sky', 'clouds', 'sunset', 'sunrise']):
             if scene_env == 'sky' or scene_type == 'outdoor':
                 score += 1.0
@@ -468,7 +442,6 @@ class MetadataScorer:
         if not dominant_colors:
             return score, reasons
         
-        # Warm/cool tone queries
         if any(w in self.query_lower for w in ['warm tone', 'warm color', 'warm photo', 'warm']):
             if color_tone == 'warm':
                 score += 1.5
@@ -479,7 +452,6 @@ class MetadataScorer:
                 score += 1.5
                 reasons.append("Cool color tones")
         
-        # Vibrance queries
         if any(w in self.query_lower for w in ['vibrant', 'colorful', 'saturated', 'vivid', 'bright color']):
             if color_vibrance == 'vibrant':
                 score += 1.5
@@ -490,13 +462,12 @@ class MetadataScorer:
                 score += 1.5
                 reasons.append("Muted colors")
         
-        # Specific color queries
         color_keywords = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'white', 'black', 'brown']
         for color in color_keywords:
             if color in self.query_lower and color in dominant_colors:
                 score += 1.2
                 reasons.append(f"Dominant color: {color}")
-                break  # Only match one specific color
+                break  
         
         return score, reasons
     
@@ -510,7 +481,6 @@ class MetadataScorer:
         exposure = metadata.get('exposure', 'unknown')
         blur_score = metadata.get('blur_score', 0)
         
-        # Blur queries
         if any(w in self.query_lower for w in ['blurry', 'blur', 'out of focus', 'unfocused']):
             if is_blurry:
                 score += 1.5
@@ -521,7 +491,6 @@ class MetadataScorer:
                 score += 1.5
                 reasons.append(f"Sharp photo (score: {blur_score})")
         
-        # Quality queries
         if any(w in self.query_lower for w in ['high quality', 'best quality', 'excellent', 'best photos', 'good quality']):
             if quality_rating in ('excellent', 'good'):
                 score += 1.5
@@ -532,7 +501,6 @@ class MetadataScorer:
                 score += 1.0
                 reasons.append("Low quality photo")
         
-        # Exposure queries
         if any(w in self.query_lower for w in ['well exposed', 'good exposure', 'proper exposure']):
             if exposure == 'well_exposed':
                 score += 1.0

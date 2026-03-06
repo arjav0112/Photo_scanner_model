@@ -23,7 +23,7 @@ class FAISSIndex:
         """
         self.index_dir = index_dir
         self.index = None
-        self.id_map = None  # Maps FAISS position -> database row ID
+        self.id_map = None
         self.dimension = None
     
     def build_index(self, ids: np.ndarray, embeddings: np.ndarray):
@@ -37,12 +37,10 @@ class FAISSIndex:
         n, d = embeddings.shape
         self.dimension = d
         
-        # Normalize embeddings for cosine similarity via inner product
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         embeddings = embeddings / (norms + 1e-8)
         embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
         
-        # IndexFlatIP = exact inner product (cosine sim for normalized vectors)
         self.index = faiss.IndexFlatIP(d)
         self.index.add(embeddings)
         self.id_map = ids.copy()
@@ -63,17 +61,13 @@ class FAISSIndex:
         if self.index is None or self.index.ntotal == 0:
             return np.array([], dtype=np.int64), np.array([], dtype=np.float32)
         
-        # Normalize query
         query = query_embedding.copy().reshape(1, -1).astype(np.float32)
         query = query / (np.linalg.norm(query) + 1e-8)
         
-        # Clamp top_k to index size
         top_k = min(top_k, self.index.ntotal)
         
-        # FAISS search
         scores, indices = self.index.search(query, top_k)
         
-        # Map FAISS indices back to database IDs
         valid = indices[0] >= 0
         faiss_indices = indices[0][valid]
         result_scores = scores[0][valid]
@@ -93,7 +87,6 @@ class FAISSIndex:
             self.build_index(ids, embeddings)
             return
         
-        # Normalize
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         embeddings = embeddings / (norms + 1e-8)
         embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
@@ -144,13 +137,11 @@ class FAISSIndex:
             db: PhotoDatabase instance
         """
         if self.load():
-            # Verify index is up to date
             db_count = db.get_photo_count()
             if self.index.ntotal == db_count:
                 return
             print(f"Index out of date ({self.index.ntotal} vs {db_count} in DB). Rebuilding...")
         
-        # Build from database
         start = time.time()
         ids, embeddings = db.get_all_embeddings_with_ids()
         

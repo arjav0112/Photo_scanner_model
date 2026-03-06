@@ -4,7 +4,6 @@ import numpy as np
 import os
 from dotenv import load_dotenv
 
-# Load environment variables (HF_TOKEN)
 load_dotenv()
 
 import psutil
@@ -22,12 +21,11 @@ class MobileCLIPHandler:
         
         self.log_memory("Before Model Load")
         
-        # Check for local offline model first
         local_path = os.path.join("assets", "local_clip_model")
         if os.path.exists(local_path):
             print(f"Loading Offline Model from: {local_path}...")
             load_target = local_path
-            load_token = None # No token needed for local files
+            load_token = None
         else:
             print(f"Loading SentenceTransformer CLIP model: {model_name} (Online/Cache)...")
             load_target = model_name
@@ -68,7 +66,6 @@ class MobileCLIPHandler:
             if os.path.exists(path):
                 try:
                     img = Image.open(path)
-                    # Force load to ensure file isn't kept open
                     img.load() 
                     valid_images.append(img)
                     valid_indices.append(i)
@@ -79,14 +76,11 @@ class MobileCLIPHandler:
             return None
             
         try:
-            # Batch encode - much faster
             embeddings = self.model.encode(valid_images, batch_size=len(valid_images), show_progress_bar=False)
             
-            # Reconstruct result array (handle missing/failed images)
             dim = embeddings.shape[1]
             result = np.zeros((len(image_paths), dim), dtype=np.float32)
             
-            # Fill valid spots
             for i, idx in enumerate(valid_indices):
                 result[idx] = embeddings[i]
                 
@@ -101,35 +95,28 @@ class MobileCLIPHandler:
         Generates an embedding for the given text using SentenceTransformer.
         """
         try:
-            # SentenceTransformer handles tokenization internally
             embedding = self.model.encode(text)
             return embedding
         except Exception as e:
             print(f"Error processing text '{text}': {e}")
-            return np.zeros(512) # Return empty vector on failure (shouldn't happen)
+            return np.zeros(512)
 
-    # Legacy method names for compatibility if needed, 
-    # but we should stick to the simple interface above.
     def identify_indices(self):
-        # Not needed for SentenceTransformer
         pass
 
 if __name__ == "__main__":
-    # Test the handler
     handler = MobileCLIPHandler()
     
-    # Test Text
     txt_emb = handler.get_text_embedding("dog")
     print(f"Text Embedding Shape: {txt_emb.shape}")
     print(f"Text Embedding First 5: {txt_emb[:5]}")
     
-    # Test Image (if exists)
+    test_img = "image/dog.png" 
     test_img = "image/dog.png" 
     if os.path.exists(test_img):
         img_emb = handler.get_image_embedding(test_img)
         print(f"Image Embedding Shape: {img_emb.shape}")
         
-        # Test Similarity
         sim = np.dot(img_emb / np.linalg.norm(img_emb), 
                     txt_emb / np.linalg.norm(txt_emb))
         print(f"Similarity (dog vs 'dog'): {sim:.4f}")

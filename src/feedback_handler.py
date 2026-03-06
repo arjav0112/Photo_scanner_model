@@ -12,10 +12,10 @@ from enum import Enum
 
 class FeedbackType(Enum):
     """Types of user feedback"""
-    POSITIVE = "POSITIVE"      # Explicit like
-    NEGATIVE = "NEGATIVE"      # Explicit dislike
-    CLICKED = "CLICKED"        # User opened/viewed image
-    IGNORED = "IGNORED"        # Shown but not interacted with
+    POSITIVE = "POSITIVE"      
+    NEGATIVE = "NEGATIVE"      
+    CLICKED = "CLICKED"        
+    IGNORED = "IGNORED"        
 
 
 class FeedbackHandler:
@@ -38,7 +38,6 @@ class FeedbackHandler:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Create feedback table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS search_feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +52,6 @@ class FeedbackHandler:
         )
         ''')
         
-        # Create index for faster queries
         cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_query_intent 
         ON search_feedback(query_intent)
@@ -133,7 +131,6 @@ class FeedbackHandler:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Get all feedback for this intent
         cursor.execute('''
         SELECT weights_used, result_scores, feedback_type, result_rank
         FROM search_feedback
@@ -155,17 +152,13 @@ class FeedbackHandler:
             weights = json.loads(weights_json)
             all_weights.append(weights)
             
-            # Consider POSITIVE and CLICKED as successful
             if feedback in ['POSITIVE', 'CLICKED']:
                 successful_weights.append(weights)
         
         if not successful_weights:
             return None
         
-        # Calculate success rate
         success_rate = len(successful_weights) / len(all_weights)
-        
-        # Calculate average successful weights
         avg_weights = {
             'visual': sum(w['visual'] for w in successful_weights) / len(successful_weights),
             'ocr': sum(w['ocr'] for w in successful_weights) / len(successful_weights),
@@ -190,11 +183,9 @@ class FeedbackHandler:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Total feedback count
         cursor.execute('SELECT COUNT(*) FROM search_feedback')
         total = cursor.fetchone()[0]
         
-        # Per intent breakdown
         cursor.execute('''
         SELECT query_intent, COUNT(*) 
         FROM search_feedback 
@@ -202,7 +193,6 @@ class FeedbackHandler:
         ''')
         by_intent = dict(cursor.fetchall())
         
-        # Per feedback type
         cursor.execute('''
         SELECT feedback_type, COUNT(*) 
         FROM search_feedback 
@@ -261,7 +251,6 @@ class FeedbackHandler:
         cursor = conn.cursor()
         
         if query:
-            # Check feedback for this specific query and result
             cursor.execute('''
             SELECT feedback_type, COUNT(*) as count
             FROM search_feedback
@@ -269,7 +258,6 @@ class FeedbackHandler:
             GROUP BY feedback_type
             ''', (result_path, query))
         else:
-            # Check all feedback for this result
             cursor.execute('''
             SELECT feedback_type, COUNT(*) as count
             FROM search_feedback
@@ -280,35 +268,29 @@ class FeedbackHandler:
         feedback_counts = dict(cursor.fetchall())
         conn.close()
         
-        # Calculate penalty/boost based on feedback
         positive = feedback_counts.get('POSITIVE', 0)
         clicked = feedback_counts.get('CLICKED', 0)
         negative = feedback_counts.get('NEGATIVE', 0)
         
         total_positive = positive + clicked
         
-        # Balanced penalties with margin for user error
         if negative > 0 and total_positive == 0:
-            # Only negative feedback - gradual penalty
-            penalty = max(0.1, 1.0 - (negative * 0.12))  # Each negative reduces by 12%, allows margin of error
+            penalty = max(0.1, 1.0 - (negative * 0.12))  
             return penalty
         
         if negative > 0 and total_positive > 0:
-            # Mixed feedback - still penalize but less harsh
             ratio = negative / (total_positive + negative)
-            penalty = max(0.3, 1.0 - ratio * 0.7)  # More aggressive (was 0.5)
+            penalty = max(0.3, 1.0 - ratio * 0.7)  
             return penalty
         
-        # Positive feedback boosts (conservative)
         if total_positive > 0:
-            boost = min(1.3, 1.0 + (total_positive * 0.06))  # Each positive adds 6%, max 30%
+            boost = min(1.3, 1.0 + (total_positive * 0.06))  
             return boost
         
-        return 1.0  # No feedback
+        return 1.0  
 
 
 if __name__ == "__main__":
-    # Test feedback handler
     handler = FeedbackHandler()
     print(f"Feedback database initialized at: {handler.db_path}")
     

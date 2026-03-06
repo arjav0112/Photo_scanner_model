@@ -25,7 +25,6 @@ def main():
     
     if args.command == "scan":
         print(f"Initializing Scanner...")
-        # Model path is now ignored inside class, handled by SentenceTransformers
         scanner = PhotoScanner(model_path="")
         scanner.scan_directory(args.directory)
         print("Scan complete.")
@@ -42,13 +41,9 @@ def main():
             print("No images found in database. Run 'scan' first.")
             return
         
-        # Load search configuration
         SearchConfig.validate()
         config = SearchConfig.get_config()
-        
-        # ============================================================
-        # QUERY ANALYSIS - Determine intent and get dynamic weights
-        # ============================================================
+
         print(f"\nAnalyzing query intent...")
         analyzer = QueryAnalyzer(config['weight_presets'])
         intent, weights, debug_info = analyzer.analyze_query(args.query)
@@ -57,23 +52,17 @@ def main():
         print(f"Weights: Visual={weights['visual']:.2f}, OCR={weights['ocr']:.2f}, Metadata={weights['metadata']:.2f}")
         print(f"Analysis: {debug_info['reason']}")
         
-        # Extract OCR tokens for enhanced matching
         ocr_tokens = analyzer.get_ocr_tokens(args.query)
         
-        # ============================================================
-        # DISK-BASED EMBEDDING CACHE — check BEFORE loading model
-        # ============================================================
         from src.search_cache import SearchCache
         cache = SearchCache(max_entries=50, ttl_seconds=300)
         
-        # Try disk cache first (no model needed!)
         text_emb = cache.get_text_embedding(args.query)
         
         if text_emb is not None:
             print(f"Disk cache hit — skipped model loading!")
-            handler = None  # Model never loaded
+            handler = None      
         else:
-            # Cache miss — must load model to encode new query
             print(f"Loading AI Model for Search...")
             handler = MobileCLIPHandler()
             
@@ -82,26 +71,18 @@ def main():
             text_emb = text_emb / np.linalg.norm(text_emb)
             cache.set_text_embedding(args.query, text_emb)
         
-        # ============================================================
-        # FAISS SEARCH - Fast vector similarity (replaces np.dot loop)
-        # ============================================================
         from src.faiss_index import FAISSIndex
         
         faiss_idx = FAISSIndex()
         faiss_idx.load_or_build(db)
         
-        # Get top candidates (only these get OCR/metadata scoring)
         top_k = min(100, total_images)
         candidate_ids, vector_scores = faiss_idx.search(text_emb, top_k=top_k)
         
         print(f"FAISS returned {len(candidate_ids)} candidates from {total_images} images")
         
-        # ============================================================
-        # RETRIEVE CANDIDATE DATA (only top results, not all images)
-        # ============================================================
         candidates = db.get_batch_by_ids(candidate_ids.tolist())
         
-        # Map scores to candidates (maintain order)
         query_lower = args.query.lower()
         has_text_query = len(query_lower) > 2
         
@@ -110,9 +91,6 @@ def main():
         for i, candidate in enumerate(candidates):
             v_score = float(vector_scores[i])
             
-            # ============================================================
-            # OCR SCORING (only on FAISS candidates, not all images)
-            # ============================================================
             o_score = 0.0
             if has_text_query and len(ocr_tokens) > 0:
                 text = candidate['ocr_text']
@@ -124,13 +102,10 @@ def main():
                         if len(token) < config['ocr_min_token_length']:
                             continue
                         
-                        # Exact word match (highest score)
                         if f" {token} " in f" {text_lower} ":
                             token_score += config['ocr_exact_match_score']
-                        # Partial/fuzzy match (medium score)
                         elif token in text_lower:
                             token_score += config['ocr_partial_match_score']
-                        # Fuzzy matching
                         else:
                             ocr_words = text_lower.split()
                             for ocr_word in ocr_words:
@@ -142,14 +117,10 @@ def main():
                     
                     o_score = min(token_score, 3.0)
             
-            # ============================================================
-            # METADATA SCORING (only on FAISS candidates)
-            # ============================================================
             m_scores, m_reasons = score_batch_metadata(args.query, [candidate['metadata']])
             m_score = m_scores[0]
             m_reason = m_reasons[0]
             
-            # Dynamic weighted scoring
             final_score = (
                 v_score * weights['visual'] +
                 o_score * weights['ocr'] +
@@ -165,14 +136,10 @@ def main():
                 "m_reasons": m_reason
             })
         
-        # Sort results
         all_results.sort(key=lambda x: x["score"], reverse=True)
         
         print(f"Compared against {total_images} images (FAISS indexed).")
         
-        # ============================================================
-        # APPLY RESULT-LEVEL PENALTIES (Immediate Feedback Impact)
-        # ============================================================
         if config.get('enable_result_penalties', True):
             from src.feedback_handler import FeedbackHandler
             feedback_handler = FeedbackHandler(config.get('feedback_db_path', 'feedback.db'))
@@ -184,57 +151,60 @@ def main():
                     result['score'] *= penalty
                     result['penalty'] = penalty
         
-        # Re-sort after applying penalties
         all_results.sort(key=lambda x: x["score"], reverse=True)
         
-        # ============================================================
-        # ADAPTIVE THRESHOLD FILTERING
-        # Only show images with scores close to the top score
-        # ============================================================
-        
-        # Load configuration
-        SearchConfig.validate()  # Ensure config is valid
+        SearchConfig.validate()
         config = SearchConfig.get_config()
         
         RELATIVE_THRESHOLD = config['relative_threshold']
-        MIN_ABSOLUTE_SCORE = config['min_absolute_score']
+        FLOOR_RATIO = config['floor_ratio']
         MAX_RESULTS = config['max_results']
-        
+
         if len(all_results) == 0:
             top_results = []
         else:
             top_score = all_results[0]["score"]
+
+            GAP_MIN_FRAC  = 0.10   
+            MAX_GAP_SCAN  = 30     
+
+            gap_threshold = None
+            scores_to_scan = [r["score"] for r in all_results[:MAX_GAP_SCAN]]
+            for j in range(1, len(scores_to_scan)):
+                drop = scores_to_scan[j - 1] - scores_to_scan[j]
+                if drop >= top_score * GAP_MIN_FRAC:
+                    gap_threshold = scores_to_scan[j - 1] - drop * 0.05
+                    break
+
+            relative_cut = top_score * (1 - RELATIVE_THRESHOLD)
+            floor_cut    = top_score * FLOOR_RATIO
+            proportional_threshold = max(relative_cut, floor_cut)
+
+            if gap_threshold is not None:
+                score_threshold = max(gap_threshold, proportional_threshold)
+                threshold_source = f"gap ({gap_threshold:.4f}) vs proportional ({proportional_threshold:.4f})"
+            else:
+                score_threshold = proportional_threshold
+                threshold_source = f"proportional (no clear gap found)"
             
-            # Calculate dynamic threshold based on top score
-            # Formula: threshold = top_score * (1 - RELATIVE_THRESHOLD)
-            # This means we show images with score >= (top_score - top_score * RELATIVE_THRESHOLD)
-            score_threshold = max(
-                top_score * (1 - RELATIVE_THRESHOLD),  # Relative threshold
-                MIN_ABSOLUTE_SCORE                      # Absolute minimum
-            )
-            
-            # Filter results based on threshold
             top_results = [
                 res for res in all_results 
                 if res["score"] >= score_threshold
             ]
             
-            # Apply safety limit
             top_results = top_results[:MAX_RESULTS]
             
-            # Ensure at least the top result is shown (even if below absolute threshold)
             if len(top_results) == 0 and len(all_results) > 0:
                 top_results = [all_results[0]]
             
-            # Log filtering statistics
             print(f"\n--- Filtering Statistics ---")
-            print(f"Configuration: Relative={RELATIVE_THRESHOLD}, MinScore={MIN_ABSOLUTE_SCORE}, MaxResults={MAX_RESULTS}")
+            print(f"Configuration: Relative={RELATIVE_THRESHOLD}, FloorRatio={FLOOR_RATIO}, MaxResults={MAX_RESULTS}")
             print(f"Top score: {top_score:.4f}")
-            print(f"Score threshold: {score_threshold:.4f}")
+            print(f"Threshold source: {threshold_source}")
+            print(f"Relative cut: {relative_cut:.4f}  |  Floor cut: {floor_cut:.4f}  |  Threshold used: {score_threshold:.4f}")
             print(f"Images passing threshold: {len(top_results)}/{len(all_results)}")
             print(f"----------------------------")
         
-        # Capture output
         with open("search_results.log", "w", encoding="utf-8") as log:
             log.write("Search Results:\n")
             log.write(f"Query: '{args.query}'\n")
@@ -250,7 +220,6 @@ def main():
             print("="*80)
             
             for idx, res in enumerate(top_results, 1):
-                # Determine match type
                 match_components = []
                 if res["v_score"] > 0.2:
                     match_components.append("Visual")
@@ -261,7 +230,6 @@ def main():
                 
                 match_type = " + ".join(match_components) if match_components else "Visual"
                 
-                # Check if result was penalized or boosted
                 feedback_info = ""
                 if 'penalty' in res:
                     if res['penalty'] > 1.0:
@@ -269,27 +237,22 @@ def main():
                     elif res['penalty'] < 1.0:
                         feedback_info = f" (⚠ Downranked {int((1 - res['penalty']) * 100)}% due to negative feedback)"
                 
-                # Format output
                 result_header = f"\n[{idx}] Score: {res['score']:.4f} ({match_type}){feedback_info}"
                 result_file = f"    File: {res['path']}"
                 
-                # Score breakdown
                 score_breakdown = f"    Breakdown: Visual={res['v_score']:.3f}, OCR={res['o_score']:.1f}, Metadata={res['m_score']:.2f}"
                 
-                # Metadata reasons
                 metadata_info = ""
                 if res["m_reasons"]:
                     reasons_str = ", ".join(res["m_reasons"])
                     metadata_info = f"    Metadata Matches: {reasons_str}"
                 
-                # Print to console
                 print(result_header)
                 print(result_file)
                 print(score_breakdown)
                 if metadata_info:
                     print(metadata_info)
                 
-                # Write to log
                 log.write(result_header + "\n")
                 log.write(result_file + "\n")
                 log.write(score_breakdown + "\n")
@@ -302,9 +265,6 @@ def main():
             print(f"\nSearch completed in {search_elapsed:.2f}s")
             print(f"Results saved to: search_results.log")
             
-            # ============================================================
-            # INTERACTIVE FEEDBACK COLLECTION
-            # ============================================================
             if len(top_results) > 0:
                 print("\n" + "="*80)
                 print("FEEDBACK MODE - Help improve search results!")
@@ -333,7 +293,6 @@ def main():
                             break
                         
                         elif user_input == 's':
-                            # Show statistics
                             stats = feedback_handler.get_feedback_stats()
                             print(f"\n--- Feedback Statistics ---")
                             print(f"Total feedback: {stats['total_feedback']}")
@@ -349,7 +308,6 @@ def main():
                                 result = top_results[idx]
                                 print(f"\nOpening: {result['path']}")
                                 
-                                # Open image in default viewer
                                 try:
                                     if sys.platform == 'win32':
                                         os.startfile(result['path'])
@@ -358,7 +316,6 @@ def main():
                                     else:
                                         subprocess.run(['xdg-open', result['path']])
                                     
-                                    # Record implicit positive feedback (clicked)
                                     feedback_handler.record_feedback(
                                         query=args.query,
                                         query_intent=intent.value.upper(),

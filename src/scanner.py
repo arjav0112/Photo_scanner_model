@@ -7,7 +7,6 @@ from .model_handler import MobileCLIPHandler
 import mimetypes
 import numpy as np
 
-# Offline reverse geocoding for GPS coordinates
 try:
     import reverse_geocoder as rg
     GEOCODER_AVAILABLE = True
@@ -19,25 +18,20 @@ class PhotoScanner:
     def __init__(self, model_path: str, db_path: str = "photos.db"):
         self.db = PhotoDatabase(db_path)
         print("Loading AI Model (this may take a moment)...")
-        # Initialize robust SentenceTransformer model
         self.model = MobileCLIPHandler()
         
-        # Initialize OCR (lazy load later or now)
         from .ocr_handler import OCRHandler
         self.ocr = OCRHandler()
         
-        # Initialize enhanced visual analyzer (faces, scene, color, quality)
         from .image_analyzer import ImageAnalyzer
         self.image_analyzer = ImageAnalyzer()
         
-        # Pre-compute document anchor embedding for Gatekeeper
         print("Initializing Gatekeeper (Document Detection)...")
         doc_text = "text document invoice receipt book page letter contract"
         self.doc_embedding = self.model.get_text_embedding(doc_text)
-        self.doc_embedding /= np.linalg.norm(self.doc_embedding) # Normalize
-        self.doc_threshold = 0.21 # Balanced: catches documents, skips regular photos
+        self.doc_embedding /= np.linalg.norm(self.doc_embedding)
+        self.doc_threshold = 0.12
 
-        # Supported extensions
         self.valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
 
     def scan_directory(self, directory: str):
@@ -47,12 +41,8 @@ class PhotoScanner:
         scan_start = time.time()
         print(f"Scanning directory: {directory}")
         
-        # ============================================================
-        # INCREMENTAL SCANNING - Detect new, modified, and deleted files
-        # ============================================================
-        scanned_data = self.db.get_scanned_paths_with_mtime()  # {path: (mtime, size)}
+        scanned_data = self.db.get_scanned_paths_with_mtime()
         
-        # Collect all files currently on disk
         disk_files = {}
         for root, _, files in os.walk(directory):
             for file in files:
@@ -64,7 +54,6 @@ class PhotoScanner:
                     except OSError:
                         continue
         
-        # Categorize files
         new_files = []
         modified_files = []
         
@@ -76,10 +65,8 @@ class PhotoScanner:
                 if abs(mtime - old_mtime) > 1.0 or size != old_size:
                     modified_files.append(path)
         
-        # Detect deleted files
         deleted_files = [p for p in scanned_data if p not in disk_files]
         
-        # Remove deleted files from DB
         if deleted_files:
             self.db.remove_photos(deleted_files)
         
@@ -111,31 +98,26 @@ class PhotoScanner:
                 if batch_idx % 5 == 0:
                      self.model.log_memory(f"Scanning Batch {batch_idx}")
                      
-                # 1. Batch Embeddings (GPU-bound, stays serial)
                 embeddings = self.model.get_image_embeddings_batch(batch_paths)
                 
                 if embeddings is None:
                     continue
                 
-                # 2. PARALLEL metadata + visual + OCR extraction (I/O-bound)
                 metadata_results = {}
                 visual_results = {}
                 ocr_results = {}
                 
                 with ThreadPoolExecutor(max_workers=4) as executor:
-                    # Submit EXIF metadata extraction tasks
                     meta_futures = {
                         executor.submit(self._extract_metadata, path): path 
                         for path in batch_paths
                     }
                     
-                    # Submit visual metadata extraction tasks (faces, scene, color, quality)
                     visual_futures = {
                         executor.submit(self.image_analyzer.analyze, path): path
                         for path in batch_paths
                     }
                     
-                    # Submit OCR tasks for document-like images
                     ocr_futures = {}
                     for i, path in enumerate(batch_paths):
                         embedding = embeddings[i]
@@ -147,7 +129,6 @@ class PhotoScanner:
                             future = executor.submit(self.ocr.extract_text, path)
                             ocr_futures[future] = path
                     
-                    # Collect EXIF metadata results
                     for future in as_completed(meta_futures):
                         path = meta_futures[future]
                         try:
@@ -155,7 +136,6 @@ class PhotoScanner:
                         except Exception:
                             metadata_results[path] = {}
                     
-                    # Collect visual metadata results
                     for future in as_completed(visual_futures):
                         path = visual_futures[future]
                         try:
@@ -163,7 +143,6 @@ class PhotoScanner:
                         except Exception:
                             visual_results[path] = {}
                     
-                    # Collect OCR results
                     for future in as_completed(ocr_futures):
                         path = ocr_futures[future]
                         try:
@@ -171,14 +150,12 @@ class PhotoScanner:
                         except Exception:
                             ocr_results[path] = ""
                 
-                # 3. Save to database
                 for i, path in enumerate(batch_paths):
                     embedding = embeddings[i]
                     if np.all(embedding == 0):
                         continue
                     
                     metadata = metadata_results.get(path, {})
-                    # Merge visual metadata (faces, scene, color, quality)
                     visual_meta = visual_results.get(path, {})
                     metadata.update(visual_meta)
                     ocr_text = ocr_results.get(path, "")
@@ -195,7 +172,6 @@ class PhotoScanner:
             except Exception as e:
                 print(f"Batch Error: {e}")
         
-        # Rebuild FAISS index after scan
         self._rebuild_faiss_index()
         
         elapsed = time.time() - scan_start
@@ -222,33 +198,25 @@ class PhotoScanner:
             from PIL.ExifTags import TAGS, GPSTAGS
             
             with Image.open(image_path) as img:
-                # Basic image properties
                 meta['width'], meta['height'] = img.size
                 meta['format'] = img.format
                 meta['mode'] = img.mode
                 
-                # Extract EXIF data
                 exif = img._getexif()
                 if exif:
-                    # Device Information
                     for tag, value in exif.items():
                         tag_name = TAGS.get(tag, tag)
                         
-                        # Camera/Device Details
                         if tag_name == 'Make':
                             meta['device_make'] = str(value).strip()
                         elif tag_name == 'Model':
                             meta['device_model'] = str(value).strip()
                         elif tag_name == 'Software':
                             meta['software'] = str(value).strip()
-                        
-                        # Date/Time Information
                         elif tag_name == 'DateTimeOriginal':
                             meta['date_taken'] = str(value)
                         elif tag_name == 'DateTime':
                             meta['date_modified'] = str(value)
-                        
-                        # Camera Settings
                         elif tag_name == 'ISOSpeedRatings':
                             meta['iso'] = int(value)
                         elif tag_name == 'FNumber':
@@ -259,19 +227,14 @@ class PhotoScanner:
                             meta['focal_length'] = f"{float(value):.1f}mm"
                         elif tag_name == 'Flash':
                             meta['flash'] = 'Yes' if value & 1 else 'No'
-                        
-                        # Image Orientation
                         elif tag_name == 'Orientation':
                             meta['orientation'] = int(value)
-                        
-                        # GPS Information
                         elif tag_name == 'GPSInfo':
                             gps_data = {}
                             for gps_tag in value:
                                 gps_tag_name = GPSTAGS.get(gps_tag, gps_tag)
                                 gps_data[gps_tag_name] = value[gps_tag]
                             
-                            # Extract GPS coordinates
                             if 'GPSLatitude' in gps_data and 'GPSLongitude' in gps_data:
                                 lat = self._convert_gps_to_decimal(
                                     gps_data['GPSLatitude'],
@@ -285,25 +248,21 @@ class PhotoScanner:
                                 meta['gps_longitude'] = lon
                                 meta['location'] = f"{lat:.6f}, {lon:.6f}"
                                 
-                                # Resolve location name offline (only if valid coordinates)
                                 if lat != 0.0 and lon != 0.0 and abs(lat) <= 90 and abs(lon) <= 180:
                                     location_name = self._resolve_location_name(lat, lon)
                                     if location_name:
                                         meta['location_name'] = location_name
                             
-                            # Altitude
                             if 'GPSAltitude' in gps_data:
                                 altitude = float(gps_data['GPSAltitude'])
                                 meta['gps_altitude'] = f"{altitude:.1f}m"
-                                meta['altitude'] = altitude  # Add numeric altitude for scoring
+                                meta['altitude'] = altitude
                             
-                            # GPS Timestamp
                             if 'GPSDateStamp' in gps_data and 'GPSTimeStamp' in gps_data:
                                 gps_date = gps_data['GPSDateStamp']
                                 gps_time = gps_data['GPSTimeStamp']
                                 meta['gps_timestamp'] = f"{gps_date} {gps_time[0]}:{gps_time[1]}:{gps_time[2]}"
             
-                # Create combined 'device' field for metadata scorer compatibility
                 if 'device_make' in meta or 'device_model' in meta:
                     make = meta.get('device_make', '')
                     model = meta.get('device_model', '')
@@ -315,7 +274,6 @@ class PhotoScanner:
                         meta['device'] = model
             
         except Exception as e:
-            # Silently fail but log if needed
             pass
         
         return meta
@@ -337,45 +295,32 @@ class PhotoScanner:
             return 0.0
     
     def _resolve_location_name(self, lat, lon):
-        """
-        Convert GPS coordinates to human-readable location name (offline).
-        Returns: "District, City, State, Country" or None if geocoder unavailable
-        
-        Only called when valid GPS coordinates exist.
-        """
-        # Early return if geocoder not available
+        """Convert GPS coordinates to human-readable location name (offline)."""
         if not GEOCODER_AVAILABLE:
             return None
         
-        # Validate coordinates
         if lat == 0.0 and lon == 0.0:
             return None
         if abs(lat) > 90 or abs(lon) > 180:
             return None
         
         try:
-            # Reverse geocode (completely offline, uses local database)
-            results = rg.search((lat, lon), mode=1)  # mode=1 for single result
+            results = rg.search((lat, lon), mode=1)
             
             if results and len(results) > 0:
                 result = results[0]
                 
-                # Build detailed location string
                 parts = []
                 
-                # Add district/admin2 (more specific than city)
                 if result.get('admin2'):
                     parts.append(result['admin2'])
                 
-                # Add city/locality (if different from admin2)
                 if result.get('name') and result.get('name') != result.get('admin2'):
                     parts.append(result['name'])
                 
-                # Add state/admin1
                 if result.get('admin1'):
                     parts.append(result['admin1'])
                 
-                # Add country name (expand country code)
                 if result.get('cc'):
                     country_map = {
                         'IN': 'India', 'US': 'United States', 'GB': 'United Kingdom',
@@ -392,13 +337,11 @@ class PhotoScanner:
         return None
 
 if __name__ == "__main__":
-    # Test
-    # Provide a directory path to scan
     import sys
     if len(sys.argv) > 1:
         scan_dir = sys.argv[1]
     else:
-        scan_dir = "." # Scan current dir by default
+        scan_dir = "."
     
     scanner = PhotoScanner(os.path.join("assets", "mobileclip_s1_datacompdr_first.tflite"))
     scanner.scan_directory(scan_dir)

@@ -53,7 +53,6 @@ class LearningEngine:
         """
         updated_presets = current_presets.copy()
         
-        # Map intent types to preset keys
         intent_to_preset = {
             'metadata': 'metadata_dominant',
             'visual': 'visual_dominant',
@@ -62,7 +61,6 @@ class LearningEngine:
         }
         
         for intent, preset_key in intent_to_preset.items():
-            # Get learning data for this intent
             learning_data = self.feedback.get_learning_data(
                 intent.upper(), 
                 self.min_samples
@@ -73,26 +71,21 @@ class LearningEngine:
                     print(f"  {intent.upper()}: Insufficient data (need {self.min_samples} samples)")
                 continue
             
-            # Check if success rate is acceptable
             if learning_data['success_rate'] < self.min_success_rate:
                 if verbose:
                     print(f"  {intent.upper()}: Low success rate ({learning_data['success_rate']:.2%}), skipping")
                 continue
             
-            # Get current and observed weights
             current_weights = updated_presets[preset_key]
             observed_weights = learning_data['avg_successful_weights']
             
-            # Apply exponential moving average with capping
             new_weights = {}
             for component in ['visual', 'ocr', 'metadata']:
                 current = current_weights[component]
                 observed = observed_weights[component]
                 
-                # EMA: new = old * (1 - α) + observed * α
                 suggested = current * (1 - self.learning_rate) + observed * self.learning_rate
                 
-                # Cap maximum adjustment
                 delta = suggested - current
                 if abs(delta) > self.max_adjustment:
                     delta = self.max_adjustment if delta > 0 else -self.max_adjustment
@@ -100,10 +93,8 @@ class LearningEngine:
                 else:
                     adjusted = suggested
                 
-                # Ensure non-negative
                 new_weights[component] = max(0.0, adjusted)
             
-            # Update preset
             updated_presets[preset_key] = new_weights
             
             if verbose:
@@ -125,12 +116,10 @@ class LearningEngine:
         stats = self.feedback.get_feedback_stats()
         total = stats.get('total_feedback', 0)
         
-        # Update if we have at least min_samples total feedback
         return total >= self.min_samples
 
 
 if __name__ == "__main__":
-    # Test learning engine
     from search_config import SearchConfig
     
     handler = FeedbackHandler()

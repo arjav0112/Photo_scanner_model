@@ -15,8 +15,6 @@ class PhotoDatabase:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Create table for photos
-        # We store the embedding as a BLOB
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,10 +27,8 @@ class PhotoDatabase:
         )
         ''')
         
-        # Create index on path for fast lookups
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_path ON photos(path)')
         
-        # Schema Migration: Check if ocr_text exists
         cursor.execute("PRAGMA table_info(photos)")
         columns = [info[1] for info in cursor.fetchall()]
         if "ocr_text" not in columns:
@@ -57,7 +53,6 @@ class PhotoDatabase:
         cursor = conn.cursor()
         
         filename = os.path.basename(path)
-        # Convert numpy array to bytes
         embedding_blob = embedding.astype(np.float32).tobytes()
         metadata_json = json.dumps(metadata) if metadata else "{}"
         
@@ -68,7 +63,6 @@ class PhotoDatabase:
             ''', (path, filename, size, mtime, embedding_blob, metadata_json, ocr_text))
             conn.commit()
         except sqlite3.IntegrityError:
-            # Already exists, maybe update? For now, ignore or print.
             print(f"File already in DB: {path}")
         
         conn.close()
@@ -87,7 +81,6 @@ class PhotoDatabase:
         
         for row in cursor.fetchall():
             path, blob = row
-            # Convert bytes back to numpy array
             emb = np.frombuffer(blob, dtype=np.float32)
             paths.append(path)
             embeddings.append(emb)
@@ -106,7 +99,6 @@ class PhotoDatabase:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Check if ocr_text column exists first (backward compatibility)
         cursor.execute("PRAGMA table_info(photos)")
         cols = [c[1] for c in cursor.fetchall()]
         has_ocr = "ocr_text" in cols
@@ -140,12 +132,10 @@ class PhotoDatabase:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Check OCR column
         cursor.execute("PRAGMA table_info(photos)")
         cols = [c[1] for c in cursor.fetchall()]
         has_ocr = "ocr_text" in cols
         
-        # Now also retrieve metadata
         query = "SELECT path, embedding, " + ("ocr_text, " if has_ocr else "'', ") + "metadata FROM photos WHERE embedding IS NOT NULL"
         cursor.execute(query)
         
@@ -166,7 +156,6 @@ class PhotoDatabase:
                 embeddings.append(emb)
                 ocr_texts.append(text if text else "")
                 
-                # Parse metadata JSON
                 try:
                     metadata = json.loads(metadata_json) if metadata_json else {}
                 except (json.JSONDecodeError, TypeError):
@@ -176,10 +165,6 @@ class PhotoDatabase:
             yield paths, np.vstack(embeddings).astype(np.float32), ocr_texts, metadata_list
             
         conn.close()
-    
-    # ================================================================
-    # FAISS Integration Methods
-    # ================================================================
     
     def get_all_embeddings_with_ids(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -231,7 +216,6 @@ class PhotoDatabase:
         WHERE id IN ({placeholders})
         ''', list(ids))
         
-        # Build result map keyed by ID for ordering
         result_map = {}
         for row in cursor.fetchall():
             row_id, path, ocr_text, metadata_json = row
@@ -249,7 +233,6 @@ class PhotoDatabase:
         
         conn.close()
         
-        # Return in same order as input IDs
         return [result_map[i] for i in ids if i in result_map]
     
     def get_photo_count(self) -> int:
@@ -260,10 +243,6 @@ class PhotoDatabase:
         count = cursor.fetchone()[0]
         conn.close()
         return count
-    
-    # ================================================================
-    # Incremental Scanning Methods
-    # ================================================================
     
     def get_scanned_paths_with_mtime(self) -> dict:
         """

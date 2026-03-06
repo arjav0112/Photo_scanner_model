@@ -26,9 +26,8 @@ class SearchCache:
         """
         self.max_entries = max_entries
         self.ttl = ttl_seconds
-        self._cache = OrderedDict()  # key -> (timestamp, data) — in-memory only
+        self._cache = OrderedDict()  
         
-        # Disk-based embedding cache directory
         self._emb_dir = os.path.join(cache_dir, self.EMBEDDING_DIR)
         os.makedirs(self._emb_dir, exist_ok=True)
     
@@ -47,10 +46,6 @@ class SearchCache:
         """Evict least recently used if over capacity."""
         while len(self._cache) > self.max_entries:
             self._cache.popitem(last=False)
-    
-    # ================================================================
-    # Text Embedding Cache (DISK-BASED — survives restarts)
-    # ================================================================
     
     def get_text_embedding(self, query: str) -> Optional[np.ndarray]:
         """Get cached text embedding from disk. No model loading needed."""
@@ -72,10 +67,6 @@ class SearchCache:
             np.save(emb_path, embedding.astype(np.float32))
         except Exception:
             pass
-    
-    # ================================================================
-    # Search Results Cache (IN-MEMORY only, fast but per-session)
-    # ================================================================
     
     def get_results(self, query: str) -> Optional[List[Dict]]:
         """Get cached search results (in-memory only)."""
@@ -101,7 +92,6 @@ class SearchCache:
     def invalidate_all(self):
         """Clear everything including disk cache."""
         self._cache.clear()
-        # Remove all cached embeddings
         for f in os.listdir(self._emb_dir):
             if f.endswith('.npy'):
                 try:
