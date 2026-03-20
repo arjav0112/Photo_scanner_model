@@ -17,11 +17,61 @@ def main():
     scan_parser = subparsers.add_parser("scan", help="Scan a directory for photos")
     scan_parser.add_argument("directory", help="Path to the directory to scan")
     
-    # Search Command (Placeholder for now)
-    search_parser = subparsers.add_parser("search", help="Search for photos (Not fully implemented without Text Tokenizer)")
+    # Search Command
+    search_parser = subparsers.add_parser("search", help="Search for photos")
     search_parser.add_argument("query", help="Text query")
 
+    # Dedupe Command
+    dedupe_parser = subparsers.add_parser("dedupe", help="Find and manage duplicate images")
+    dedupe_parser.add_argument(
+        "--phash-threshold", type=int, default=10,
+        help="Hamming distance threshold for pHash matching (default: 10, 0=pixel-identical)"
+    )
+    dedupe_parser.add_argument(
+        "--embedding-threshold", type=float, default=0.95,
+        help="Cosine similarity threshold for embedding-based matching (default: 0.95)"
+    )
+    dedupe_parser.add_argument(
+        "--no-embedding", action="store_true",
+        help="Skip CLIP embedding similarity check (faster, pHash only)"
+    )
+    dedupe_parser.add_argument(
+        "--auto-mark", action="store_true",
+        help="Automatically mark duplicates in the database without interactive review"
+    )
+    dedupe_parser.add_argument(
+        "--delete", action="store_true",
+        help="Delete duplicate files from disk (IRREVERSIBLE — use with caution)"
+    )
+    dedupe_parser.add_argument(
+        "--list", action="store_true",
+        help="List all previously marked duplicates stored in the database"
+    )
+
+    # Face Grouping Commands
+    group_faces_parser = subparsers.add_parser(
+        "group-faces", help="Cluster all detected faces into person identities"
+    )
+    group_faces_parser.add_argument(
+        "--reset", action="store_true",
+        help="Wipe existing person assignments and recluster from scratch"
+    )
+
+    name_person_parser = subparsers.add_parser(
+        "name-person", help="Assign a name to a person cluster"
+    )
+    name_person_parser.add_argument("person_id", type=int, help="Person ID from group-faces output")
+    name_person_parser.add_argument("name", help="Human-readable name for this person")
+
+    search_person_parser = subparsers.add_parser(
+        "search-person", help="List all photos containing a specific person"
+    )
+    search_person_parser.add_argument(
+        "person", help="Person name or numeric ID"
+    )
+
     args = parser.parse_args()
+
     
     if args.command == "scan":
         print(f"Initializing Scanner...")
@@ -390,8 +440,272 @@ def main():
                     except Exception as e:
                         print(f"Error: {e}")
     
+    elif args.command == "dedupe":
+        import time as _time
+        from src.duplicate_detector import DuplicateDetector, phash_to_bytes, compute_phash, bytes_to_phash
+        import os
+
+        db = PhotoDatabase()
+        total = db.get_photo_count()
+        if total == 0:
+            print("No images in database. Run 'scan' first.")
+            return
+
+        # ── List mode ──────────────────────────────────────────────────────
+        if args.list:
+            flagged = db.get_duplicates()
+            if not flagged:
+                print("No duplicates currently flagged in the database.")
+            else:
+                print(f"\n{'='*70}")
+                print(f"Flagged Duplicates ({len(flagged)} images)")
+                print(f"{'='*70}")
+                for d in flagged:
+                    print(f"  DUPLICATE : {d['path']}")
+                    print(f"  ORIGINAL  : {d['duplicate_of']}")
+                    print()
+            return
+
+        # ── Detection phase ────────────────────────────────────────────────
+        print(f"\nLoading {total} images from database for duplicate detection...")
+        t0 = _time.time()
+        entries = db.get_all_for_dedup()
+
+        # Compute missing pHashes (existing DB records scanned before this feature)
+        need_phash = [e for e in entries if e['phash'] is None]
+        if need_phash:
+            print(f"Computing pHash for {len(need_phash)} images (one-time backfill)...")
+            from tqdm import tqdm
+            for e in tqdm(need_phash, desc="pHash backfill"):
+                ph = compute_phash(e['path'])
+                if ph is not None:
+                    db.update_phash(e['path'], phash_to_bytes(ph))
+                    e['phash'] = ph
+
+        detector = DuplicateDetector(
+            phash_threshold     = args.phash_threshold,
+            embedding_threshold = args.embedding_threshold,
+        )
+
+        use_embedding = not args.no_embedding
+        print(f"\nRunning duplicate detection...")
+        print(f"  pHash threshold      : ≤ {args.phash_threshold} bits Hamming distance")
+        if use_embedding:
+            print(f"  Embedding threshold  : ≥ {args.embedding_threshold:.2f} cosine similarity")
+        else:
+            print(f"  Embedding check      : DISABLED")
+
+        dup_groups = detector.find_all_duplicates(entries, use_embedding=use_embedding)
+        elapsed = _time.time() - t0
+
+        print(f"\nDetection completed in {elapsed:.2f}s")
+        print(f"{'='*70}")
+
+        if not dup_groups:
+            print("✅  No duplicates found.")
+            return
+
+        type_labels = {
+            'exact':      '🔴 EXACT       (pixel-identical hash)',
+            'near_exact': '🟠 NEAR-EXACT  (slight compression/resize)',
+            'semantic':   '🟡 SEMANTIC    (visually similar, different file)',
+        }
+
+        total_dupes = sum(len(g['remove']) for g in dup_groups)
+        print(f"Found {len(dup_groups)} duplicate group(s), {total_dupes} removable image(s)")
+        print(f"{'='*70}")
+
+        for gidx, group in enumerate(dup_groups, 1):
+            label = type_labels.get(group['type'], group['type'])
+            print(f"\nGroup {gidx} — {label}")
+            print(f"  KEEP   : {group['keep']}")
+            for r in group['remove']:
+                print(f"  REMOVE : {r}")
+
+        print(f"\n{'='*70}")
+
+        # ── Auto-mark mode ─────────────────────────────────────────────────
+        if args.auto_mark or args.delete:
+            marked = 0
+            deleted_files = 0
+            for group in dup_groups:
+                for r in group['remove']:
+                    db.mark_as_duplicate(r, group['keep'])
+                    marked += 1
+                    if args.delete:
+                        try:
+                            if os.path.exists(r):
+                                os.remove(r)
+                                deleted_files += 1
+                                print(f"  Deleted: {r}")
+                        except OSError as e:
+                            print(f"  Could not delete {r}: {e}")
+            
+            if args.delete:
+                # Remove deleted records from DB
+                to_remove = [r for g in dup_groups for r in g['remove']]
+                db.delete_photos_by_path(to_remove)
+                print(f"\n✅  Deleted {deleted_files} file(s) from disk and database.")
+            else:
+                print(f"\n✅  Marked {marked} image(s) as duplicates in the database.")
+                print("   Run with --delete to remove them from disk.")
+            return
+
+        # ── Interactive review mode ────────────────────────────────────────
+        print("\nInteractive Mode: Review each group before taking action.")
+        print("Commands: [m] Mark as duplicate  [d] Delete from disk  [s] Skip  [q] Quit")
+        print(f"{'='*70}")
+
+        import subprocess, sys
+
+        marked_total = 0
+        deleted_total = 0
+
+        for gidx, group in enumerate(dup_groups, 1):
+            label = type_labels.get(group['type'], group['type'])
+            print(f"\n[Group {gidx}/{len(dup_groups)}] {label}")
+            print(f"  KEEP   : {group['keep']}")
+            for ridx, r in enumerate(group['remove'], 1):
+                print(f"  REMOVE {ridx}: {r}")
+
+            while True:
+                try:
+                    cmd = input("  Action [m/d/s/q]: ").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    cmd = 'q'
+
+                if cmd == 'q':
+                    print("\nExiting interactive mode.")
+                    print(f"Summary: {marked_total} marked, {deleted_total} deleted.")
+                    return
+                elif cmd == 's':
+                    print("  Skipped.")
+                    break
+                elif cmd == 'm':
+                    for r in group['remove']:
+                        db.mark_as_duplicate(r, group['keep'])
+                        marked_total += 1
+                    print(f"  ✓ Marked {len(group['remove'])} image(s) as duplicate.")
+                    break
+                elif cmd == 'd':
+                    confirm = input(f"  ⚠ Delete {len(group['remove'])} file(s) from disk? [yes/no]: ").strip().lower()
+                    if confirm == 'yes':
+                        deleted = []
+                        for r in group['remove']:
+                            try:
+                                if os.path.exists(r):
+                                    os.remove(r)
+                                    deleted.append(r)
+                                    deleted_total += 1
+                                    print(f"    Deleted: {r}")
+                            except OSError as e:
+                                print(f"    Error deleting {r}: {e}")
+                        if deleted:
+                            db.delete_photos_by_path(deleted)
+                        break
+                    else:
+                        print("  Cancelled.")
+                else:
+                    print("  Unknown command. Use m/d/s/q.")
+
+        print(f"\n{'='*70}")
+        print(f"Done. {marked_total} image(s) marked as duplicates, {deleted_total} deleted from disk.")
+    
+    elif args.command == "group-faces":
+        import time as _time
+        db = PhotoDatabase()
+
+        if args.reset:
+            print("Resetting all person assignments...")
+            db.delete_all_persons()
+
+        print("Loading all face embeddings from database...")
+        face_rows = db.get_all_faces_with_embeddings()
+
+        if not face_rows:
+            print("No faces found. Run 'scan' first so faces are detected.")
+            return
+
+        print(f"Found {len(face_rows)} face(s). Clustering...")
+        t0 = _time.time()
+
+        from src.person_clusterer import cluster_faces, compute_cluster_centroid
+        import numpy as _np
+
+        embeddings = _np.vstack([f["embedding"] for f in face_rows])
+        face_ids   = [f["id"] for f in face_rows]
+
+        label_map = cluster_faces(embeddings, face_ids)  # {face_id: cluster_label}
+
+        # Remap cluster labels (-1 stays unassigned) → real person IDs in DB
+        cluster_to_person: dict = {}
+        for face_id, label in label_map.items():
+            if label == -1:
+                continue
+            if label not in cluster_to_person:
+                # Pick best-quality face as representative (highest det_score)
+                pid = db.add_person(name=None, rep_face_id=face_id)
+                cluster_to_person[label] = pid
+            db.update_face_person(face_id, cluster_to_person[label])
+
+        elapsed = _time.time() - t0
+        persons = db.get_persons()
+
+        print(f"\nClustering complete in {elapsed:.2f}s")
+        print(f"{'='*60}")
+        print(f"{'ID':<6} {'Name':<20} {'Photos with this person':>25}")
+        print(f"{'='*60}")
+        for p in persons:
+            name = p["name"] or "(unnamed)"
+            photos = db.get_photos_for_person(p["id"])
+            print(f"{p['id']:<6} {name:<20} {len(photos):>25}")
+        print(f"{'='*60}")
+        print(f"\nUse 'name-person <id> <name>' to label any person.")
+        print(f"Use 'search-person <name_or_id>' to find their photos.")
+
+    elif args.command == "name-person":
+        db = PhotoDatabase()
+        db.update_person_name(args.person_id, args.name)
+        print(f"Person {args.person_id} → '{args.name}'")
+
+    elif args.command == "search-person":
+        db = PhotoDatabase()
+        persons = db.get_persons()
+
+        # Match by numeric ID or name substring
+        query = args.person.strip()
+        matched = None
+        if query.isdigit():
+            pid = int(query)
+            for p in persons:
+                if p["id"] == pid:
+                    matched = p
+                    break
+        else:
+            q_lower = query.lower()
+            for p in persons:
+                if p["name"] and q_lower in p["name"].lower():
+                    matched = p
+                    break
+
+        if matched is None:
+            print(f"No person found matching '{query}'. Run 'group-faces' first.")
+            persons = db.get_persons()
+            if persons:
+                print("\nKnown persons:")
+                for p in persons:
+                    print(f"  ID {p['id']}: {p['name'] or '(unnamed)'} — {p['face_count']} face(s)")
+            return
+
+        photos = db.get_photos_for_person(matched["id"])
+        print(f"\nPerson: {matched['name'] or '(unnamed)'} (ID {matched['id']})")
+        print(f"Found in {len(photos)} photo(s):\n")
+        for ph in photos:
+            print(f"  {ph}")
+
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()

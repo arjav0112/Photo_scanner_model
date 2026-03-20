@@ -4,6 +4,7 @@ import time
 from tqdm import tqdm
 from .database import PhotoDatabase
 from .model_handler import MobileCLIPHandler
+from .duplicate_detector import compute_phash, phash_to_bytes
 import mimetypes
 import numpy as np
 
@@ -31,6 +32,10 @@ class PhotoScanner:
         self.doc_embedding = self.model.get_text_embedding(doc_text)
         self.doc_embedding /= np.linalg.norm(self.doc_embedding)
         self.doc_threshold = 0.12
+
+        # Face recognition – loaded lazily on first use
+        self._face_detect = None
+        self._face_centroids = None  # refreshed once per scan
 
         self.valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
 
@@ -166,6 +171,15 @@ class PhotoScanner:
                             self.db.update_photo(path, stat.st_size, stat.st_mtime, embedding, metadata, ocr_text)
                         else:
                             self.db.add_photo(path, stat.st_size, stat.st_mtime, embedding, metadata, ocr_text)
+                        
+                        # Compute and store perceptual hash for duplicate detection
+                        phash_int = compute_phash(path)
+                        if phash_int is not None:
+                            self.db.update_phash(path, phash_to_bytes(phash_int))
+
+                        # Face detection & incremental assignment
+                        self._process_faces_for_photo(path)
+
                     except Exception as e:
                         print(f"DB Error {path}: {e}")
                     
@@ -189,6 +203,58 @@ class PhotoScanner:
                 print("FAISS search index rebuilt")
         except Exception as e:
             print(f"FAISS index rebuild failed: {e}")
+
+    def _get_face_detector(self):
+        """Lazily load the InsightFace detector (downloads model on first run)."""
+        if self._face_detect is None:
+            from .face_detector import detect_faces
+            self._face_detect = detect_faces
+        return self._face_detect
+
+    def _process_faces_for_photo(self, path: str):
+        """Detect faces in one photo and store them; then incrementally assign persons."""
+        try:
+            photo_id = self.db.get_photo_id(path)
+            if photo_id is None:
+                return
+
+            # Clear stale faces (handles re-scanned photos)
+            self.db.delete_faces_for_photo(photo_id)
+
+            detect_faces = self._get_face_detector()
+            faces = detect_faces(path)
+
+            if not faces:
+                return
+
+            # Refresh centroids once per scan batch on first face found
+            if self._face_centroids is None:
+                self._face_centroids = self.db.get_person_centroids()
+
+            from .person_clusterer import assign_new_face
+
+            for face in faces:
+                face_id = self.db.add_face(
+                    photo_id=photo_id,
+                    bbox=face["bbox"],
+                    det_score=face["det_score"],
+                    embedding=face["embedding"],
+                    age=face.get("age"),
+                    gender=face.get("gender"),
+                )
+
+                # Incremental assignment to existing person clusters
+                if self._face_centroids:
+                    pid = assign_new_face(face["embedding"], self._face_centroids)
+                    if pid is not None:
+                        self.db.update_face_person(face_id, pid)
+
+        except Exception as e:
+            print(f"[FaceDetect] Error on {path}: {e}")
+
+    def reset_face_centroids(self):
+        """Call this between scan batches to refresh centroid cache."""
+        self._face_centroids = None
 
     def _extract_metadata(self, image_path: str) -> dict:
         """Extracts comprehensive metadata including GPS, device info, and camera settings."""
@@ -296,6 +362,7 @@ class PhotoScanner:
     
     def _resolve_location_name(self, lat, lon):
         """Convert GPS coordinates to human-readable location name (offline)."""
+        
         if not GEOCODER_AVAILABLE:
             return None
         

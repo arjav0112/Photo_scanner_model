@@ -28,6 +28,8 @@ dependencies = [
     "faiss-cpu (>=1.13.2,<2.0.0)",
     "ultralytics (>=8.4.17,<9.0.0)",
     "opencv-python (>=4.13.0.92,<5.0.0.0)",
+    "insightface (>=0.7.3,<0.8.0)",
+    "scipy (>=1.17.1,<2.0.0)",
 ]
 
 

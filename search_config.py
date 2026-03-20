@@ -112,6 +112,25 @@ class SearchConfig:
     # This would detect natural gaps in score distribution
     ENABLE_GAP_DETECTION = False
     GAP_THRESHOLD = 0.05  # Minimum gap to consider as a natural break
+
+    # ========== DUPLICATE DETECTION CONFIGURATION ==========
+
+    # Perceptual hash (pHash) Hamming distance threshold.
+    # 0  = pixel-identical images only
+    # ≤10 = near-exact duplicates (JPEG saves, minor compressions)  ← recommended
+    # ≤20 = looser near-duplicates (may flag similar-looking photos)
+    DEDUP_PHASH_THRESHOLD = 10
+
+    # CLIP embedding cosine similarity threshold for semantic duplicates.
+    # 0.98 = near-identical rendering
+    # 0.95 = very similar image (different crop/filter)           ← recommended
+    # 0.90 = semantically similar (may flag related-but-distinct photos)
+    DEDUP_EMBEDDING_THRESHOLD = 0.95
+
+    # Whether to use CLIP embeddings in addition to pHash.
+    # True  = catches edited/filtered duplicates pHash misses (slower)
+    # False = pHash only, very fast
+    DEDUP_USE_EMBEDDING = True
     
     @classmethod
     def get_config(cls):
@@ -135,6 +154,10 @@ class SearchConfig:
             'max_weight_adjustment': cls.MAX_WEIGHT_ADJUSTMENT,
             'feedback_db_path': cls.FEEDBACK_DB_PATH,
             'enable_result_penalties': cls.ENABLE_RESULT_PENALTIES,
+            # Duplicate detection
+            'dedup_phash_threshold':     cls.DEDUP_PHASH_THRESHOLD,
+            'dedup_embedding_threshold': cls.DEDUP_EMBEDDING_THRESHOLD,
+            'dedup_use_embedding':       cls.DEDUP_USE_EMBEDDING,
         }
     
     @classmethod
