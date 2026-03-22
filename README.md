@@ -211,18 +211,6 @@ Dedupe thresholds (can also be set via CLI flags):
 
 ---
 
-## 📱 Mobile Export (Optional)
-
-Export the quantized ONNX model and database for use in a mobile app:
-
-```bash
-poetry run python export_to_mobile.py
-```
-
-Output is saved to `assets/mobile_model_quantized/` (~150 MB, ~4× smaller than the full model).
-
----
-
 ## 🗄 Database Schema
 
 `photos.db` (SQLite) — three tables:
