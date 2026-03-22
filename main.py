@@ -28,8 +28,8 @@ def main():
         help="Hamming distance threshold for pHash matching (default: 10, 0=pixel-identical)"
     )
     dedupe_parser.add_argument(
-        "--embedding-threshold", type=float, default=0.95,
-        help="Cosine similarity threshold for embedding-based matching (default: 0.95)"
+        "--embedding-threshold", type=float, default=0.90,
+        help="Cosine similarity threshold for embedding-based matching (default: 0.90)"
     )
     dedupe_parser.add_argument(
         "--no-embedding", action="store_true",

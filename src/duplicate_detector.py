@@ -2,7 +2,6 @@
 import numpy as np
 from PIL import Image
 from typing import List, Tuple, Dict, Optional
-import struct
 
 
 # ── Perceptual Hash (pHash) ──────────────────────────────────────────────────
@@ -47,25 +46,32 @@ def compute_phash(image_path: str, hash_size: int = 16) -> Optional[int]:
 
 
 def _dct2(matrix: np.ndarray) -> np.ndarray:
-    """Fast approximation of 2-D DCT-II using separable 1-D transforms."""
-    return _dct1d(_dct1d(matrix, axis=0), axis=1)
+    """
+    2-D DCT-II via two separable 1-D passes (rows then columns).
+    No scipy needed; works on any (H, W) float32 array.
+    """
+    return _dct1d_cols(_dct1d_rows(matrix))
 
 
-def _dct1d(x: np.ndarray, axis: int = 0) -> np.ndarray:
-    """1-D DCT-II via numpy (no scipy needed)."""
-    n = x.shape[axis]
-    # Extend signal: [x, x_reversed] then take real RFFT
-    if axis == 0:
-        v = np.concatenate([x, x[::-1, :]], axis=0)
-    else:
-        v = np.concatenate([x, x[:, ::-1]], axis=1)
-    V = np.fft.rfft(v, axis=axis)
-    k = np.arange(n, dtype=np.float64)
-    factor = 2 * np.exp(-1j * np.pi * k / (2 * n))
-    if axis == 0:
-        factor = factor[:, np.newaxis]
-    result = np.real(V[:n] if axis == 0 else V[:, :n]) * np.real(factor[:n] if axis == 0 else factor[:, :n])
-    return result
+def _dct1d_rows(x: np.ndarray) -> np.ndarray:
+    """Apply 1-D DCT-II along axis=0 (each column independently)."""
+    n = x.shape[0]
+    # Mirror: [x ; flip(x,0)]  →  length-2n signal, then RFFT
+    v = np.concatenate([x, x[::-1, :]], axis=0)          # (2n, W)
+    V = np.fft.rfft(v, axis=0)                            # (n+1, W) complex
+    k = np.arange(n, dtype=np.float64).reshape(-1, 1)    # (n, 1)
+    factor = 2.0 * np.exp(-1j * np.pi * k / (2 * n))    # (n, 1)
+    return np.real(V[:n, :]) * np.real(factor)            # (n, W)
+
+
+def _dct1d_cols(x: np.ndarray) -> np.ndarray:
+    """Apply 1-D DCT-II along axis=1 (each row independently)."""
+    n = x.shape[1]
+    v = np.concatenate([x, x[:, ::-1]], axis=1)          # (H, 2n)
+    V = np.fft.rfft(v, axis=1)                            # (H, n+1) complex
+    k = np.arange(n, dtype=np.float64).reshape(1, -1)    # (1, n)
+    factor = 2.0 * np.exp(-1j * np.pi * k / (2 * n))    # (1, n)
+    return np.real(V[:, :n]) * np.real(factor)            # (H, n)
 
 
 def hamming_distance(hash_a: int, hash_b: int) -> int:
@@ -83,6 +89,91 @@ def bytes_to_phash(blob: bytes) -> int:
     return int.from_bytes(blob, byteorder='big')
 
 
+# ── Union-Find (Disjoint Set) ────────────────────────────────────────────────
+
+class UnionFind:
+    """
+    Path-compressed, rank-unioned disjoint set for O(α(n)) operations.
+    Works on integer indices; use an external index↔path mapping.
+    """
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.rank   = [0] * n
+
+    def find(self, x: int) -> int:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]   # path halving
+            x = self.parent[x]
+        return x
+
+    def union(self, x: int, y: int) -> bool:
+        rx, ry = self.find(x), self.find(y)
+        if rx == ry:
+            return False
+        if self.rank[rx] < self.rank[ry]:
+            rx, ry = ry, rx
+        self.parent[ry] = rx
+        if self.rank[rx] == self.rank[ry]:
+            self.rank[rx] += 1
+        return True
+
+    def groups(self) -> Dict[int, List[int]]:
+        """Return {root: [indices_in_group]} for groups with ≥ 2 members."""
+        from collections import defaultdict
+        buckets: Dict[int, List[int]] = defaultdict(list)
+        for i in range(len(self.parent)):
+            buckets[self.find(i)].append(i)
+        return {r: members for r, members in buckets.items() if len(members) >= 2}
+
+
+# ── BK-Tree for pHash ────────────────────────────────────────────────────────
+
+class BKTree:
+    """
+    Burkhard-Keller tree over integer pHashes using Hamming distance.
+    Allows sub-linear (O(log n) average) range queries for near-duplicates.
+    """
+    def __init__(self):
+        # Each node: (hash_int, index, {dist: child_node})
+        self._root: Optional[Tuple] = None
+
+    def _make_node(self, h: int, idx: int) -> list:
+        return [h, idx, {}]
+
+    def insert(self, h: int, idx: int):
+        if self._root is None:
+            self._root = self._make_node(h, idx)
+            return
+        node = self._root
+        while True:
+            d = hamming_distance(h, node[0])
+            if d == 0:
+                return          # exact duplicate hash already in tree
+            children = node[2]
+            if d not in children:
+                children[d] = self._make_node(h, idx)
+                return
+            node = children[d]
+
+    def find_within(self, h: int, threshold: int) -> List[int]:
+        """Return indices of all entries within Hamming distance ≤ threshold."""
+        if self._root is None:
+            return []
+        results = []
+        stack = [self._root]
+        while stack:
+            node = stack.pop()
+            d = hamming_distance(h, node[0])
+            if d <= threshold:
+                results.append(node[1])
+            low  = max(1, d - threshold)
+            high = d + threshold
+            for dist, child in node[2].items():
+                if low <= dist <= high:
+                    stack.append(child)
+        return results
+
+
 # ── Duplicate Group Detection ────────────────────────────────────────────────
 
 class DuplicateDetector:
@@ -90,66 +181,76 @@ class DuplicateDetector:
     Finds duplicate and near-duplicate images using two complementary methods:
 
     1. Perceptual Hash (pHash)  — exact & near-exact pixel-level matches
-       • Hamming distance ≤ PHASH_THRESHOLD → near-exact duplicate
-       • Very fast: O(n²) bitmap comparisons, but we use early exit.
+       • BK-tree range query:  O(n log n) average  (was O(n²))
+       • Union-Find grouping:  O(n · α(n)) ≈ O(n)
 
     2. CLIP Embedding Cosine Similarity — visually / semantically similar
-       • Cosine similarity ≥ EMBEDDING_THRESHOLD → semantic near-duplicate
-       • Slower, but catches edits, filters, crops that fool pHash.
+       • FAISS IVF or Flat index:  O(n log n) build + O(n · k) queries
+       • Union-Find grouping
+
+    Thresholds
+    ----------
+    pHash Hamming distance:
+      0     → pixel-identical
+      ≤ 10  → near-exact (slight crop/resize/compression)   [default]
+      ≤ 20  → moderate near-duplicate
+
+    Embedding cosine similarity:
+      ≥ 0.98 → near-exact rendered differently
+      ≥ 0.95 → near-duplicate (same scene, minor framing)   [default]
+      ≥ 0.90 → semantically similar
     """
 
-    # Hamming distance thresholds (lower = stricter)
-    # 0  → bit-identical hash (pixel-perfect or near-identical JPEG)
-    # ≤10 → strong near-duplicate (slight crop/resize/compression)
-    # ≤20 → moderate near-duplicate (may include similar but distinct images)
-    PHASH_EXACT_THRESHOLD   = 0    # pixel-identical
-    PHASH_NEAR_THRESHOLD    = 10   # near-exact (default)
+    PHASH_EXACT_THRESHOLD    = 0
+    PHASH_NEAR_THRESHOLD     = 10
 
-    # Embedding cosine similarity thresholds
-    # 0.98 → essentially the same image rendered differently
-    # 0.95 → very similar (same scene, slightly different framing)
-    # 0.90 → semantically similar but possibly different shots
-    EMBEDDING_HIGH_THRESHOLD = 0.98  # near-exact
-    EMBEDDING_NEAR_THRESHOLD = 0.95  # near-duplicate (default)
+    EMBEDDING_HIGH_THRESHOLD = 0.98
+    EMBEDDING_NEAR_THRESHOLD = 0.90
 
     def __init__(self, phash_threshold: int = None, embedding_threshold: float = None):
         self.phash_threshold     = phash_threshold     if phash_threshold     is not None else self.PHASH_NEAR_THRESHOLD
         self.embedding_threshold = embedding_threshold if embedding_threshold is not None else self.EMBEDDING_NEAR_THRESHOLD
 
-    # ── pHash-based grouping ─────────────────────────────────────────────────
+    # ── pHash grouping  O(n log n) ───────────────────────────────────────────
 
     def find_phash_duplicates(
         self,
         entries: List[Dict]   # each: {'path': str, 'phash': int}
     ) -> List[List[str]]:
         """
-        Groups images by pHash similarity (Hamming distance ≤ threshold).
+        Groups images by pHash similarity using a BK-tree + Union-Find.
         Returns list of duplicate groups (each group has ≥ 2 paths).
-        Only paths whose phash != None are considered.
+
+        Complexity: O(n log n) average, vs O(n²) previously.
         """
         valid = [(e['path'], e['phash']) for e in entries if e.get('phash') is not None]
         n = len(valid)
-        visited = [False] * n
-        groups = []
+        if n < 2:
+            return []
 
-        for i in range(n):
-            if visited[i]:
-                continue
-            group = [valid[i][0]]
-            for j in range(i + 1, n):
-                if visited[j]:
-                    continue
-                dist = hamming_distance(valid[i][1], valid[j][1])
-                if dist <= self.phash_threshold:
-                    group.append(valid[j][0])
-                    visited[j] = True
-            if len(group) > 1:
-                visited[i] = True
-                groups.append(group)
+        # Build BK-tree
+        tree = BKTree()
+        for idx, (_, h) in enumerate(valid):
+            tree.insert(h, idx)
+
+        # Union-Find over indices
+        uf = UnionFind(n)
+
+        for i, (_, h) in enumerate(valid):
+            neighbours = tree.find_within(h, self.phash_threshold)
+            for j in neighbours:
+                if j != i:
+                    uf.union(i, j)
+
+        # Collect groups
+        groups = []
+        for members in uf.groups().values():
+            paths = [valid[m][0] for m in members]
+            groups.append(paths)
 
         return groups
 
-    # ── Embedding-based grouping ─────────────────────────────────────────────
+    # ── Embedding grouping  O(n log n) ──────────────────────────────────────
 
     def find_embedding_duplicates(
         self,
@@ -157,43 +258,81 @@ class DuplicateDetector:
         embeddings: np.ndarray   # shape (N, D), already L2-normalised
     ) -> List[List[str]]:
         """
-        Groups images by CLIP embedding cosine similarity ≥ threshold.
-        Returns list of duplicate groups (each group has ≥ 2 paths).
-        Embeddings must be L2-normalised (dot product = cosine similarity).
+        Groups images by CLIP embedding cosine similarity ≥ threshold
+        using FAISS for ANN search + Union-Find for grouping.
+
+        Complexity: O(n log n) build + O(n · k) queries  (k = neighbours per image).
+        Falls back to brute-force if FAISS is unavailable.
         """
         n = len(paths)
-        if n == 0:
+        if n < 2:
             return []
 
-        # Normalise just in case
+        # Normalise
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1e-9, norms)
-        emb_norm = embeddings / norms
+        emb_norm = (embeddings / norms).astype(np.float32)
 
-        visited = [False] * n
+        uf = UnionFind(n)
+
+        try:
+            import faiss
+            self._faiss_group(emb_norm, uf)
+        except ImportError:
+            self._bruteforce_group(emb_norm, uf)
+
         groups = []
-
-        # Batch cosine similarity via matrix multiply
-        # For large collections we chunk to avoid huge memory usage
-        chunk_size = 512
-        for i in range(n):
-            if visited[i]:
-                continue
-            group = [paths[i]]
-            # Compute similarities of i against i+1..n-1 in chunks
-            for start in range(i + 1, n, chunk_size):
-                end = min(start + chunk_size, n)
-                sims = emb_norm[i] @ emb_norm[start:end].T
-                for offset, sim in enumerate(sims):
-                    j = start + offset
-                    if not visited[j] and sim >= self.embedding_threshold:
-                        group.append(paths[j])
-                        visited[j] = True
-            if len(group) > 1:
-                visited[i] = True
-                groups.append(group)
+        for members in uf.groups().values():
+            paths_in_group = [paths[m] for m in members]
+            groups.append(paths_in_group)
 
         return groups
+
+    def _faiss_group(self, emb_norm: np.ndarray, uf: UnionFind):
+        """FAISS inner-product search (= cosine similarity on normalised vecs)."""
+        import faiss
+        n, d = emb_norm.shape
+
+        # Use IVF for large collections, Flat for small ones
+        if n >= 1000:
+            nlist = min(int(n ** 0.5), 256)
+            quantiser = faiss.IndexFlatIP(d)
+            index = faiss.IndexIVFFlat(quantiser, d, nlist, faiss.METRIC_INNER_PRODUCT)
+            index.train(emb_norm)
+            index.nprobe = max(1, nlist // 4)
+        else:
+            index = faiss.IndexFlatIP(d)
+
+        index.add(emb_norm)
+
+        # For each image retrieve its k nearest neighbours
+        k = min(16, n)
+        sims, indices = index.search(emb_norm, k)   # (n, k)
+
+        threshold = float(self.embedding_threshold)
+        for i in range(n):
+            for rank in range(k):
+                j   = int(indices[i, rank])
+                sim = float(sims[i, rank])
+                if j == i or j < 0:
+                    continue
+                if sim >= threshold:
+                    uf.union(i, j)
+                else:
+                    break   # FAISS results are sorted by similarity desc
+
+    def _bruteforce_group(self, emb_norm: np.ndarray, uf: UnionFind):
+        """Fallback O(n²) cosine grouping when FAISS is not installed."""
+        n = len(emb_norm)
+        chunk = 512
+        threshold = float(self.embedding_threshold)
+        for i in range(n):
+            for start in range(i + 1, n, chunk):
+                end = min(start + chunk, n)
+                sims = emb_norm[i] @ emb_norm[start:end].T
+                for offset, sim in enumerate(sims):
+                    if sim >= threshold:
+                        uf.union(i, start + offset)
 
     # ── Combined grouping ────────────────────────────────────────────────────
 
@@ -208,58 +347,47 @@ class DuplicateDetector:
         Returns a list of duplicate-group dicts:
         {
             'type': 'exact' | 'near_exact' | 'semantic',
-            'paths': [path1, path2, ...],   # all duplicates in this group
-            'keep': path1,                   # suggested file to keep (first = largest)
-            'remove': [path2, ...]           # suggested files to remove
+            'paths': [path1, path2, ...],
+            'keep': path1,                   # largest file (highest quality)
+            'remove': [path2, ...]
         }
         """
         # ── Phase 1: pHash grouping ──
         phash_groups = self.find_phash_duplicates(entries)
 
-        # Flatten phash-grouped paths into a set (they are handled)
         phash_covered = set()
         for g in phash_groups:
             phash_covered.update(g)
 
-        # ── Phase 2: Embedding grouping (on remaining paths) ──
+        # ── Phase 2: Embedding grouping (on remaining paths only) ──
         emb_groups = []
         if use_embedding:
             remaining = [e for e in entries if e['path'] not in phash_covered and e.get('embedding') is not None]
-            if remaining:
-                paths_r   = [e['path'] for e in remaining]
-                embs_r    = np.vstack([e['embedding'] for e in remaining])
+            if len(remaining) >= 2:
+                paths_r = [e['path'] for e in remaining]
+                embs_r  = np.vstack([e['embedding'] for e in remaining])
                 emb_groups = self.find_embedding_duplicates(paths_r, embs_r)
 
-        # ── Build result groups ──
+        # ── Build result dicts ──
         result = []
 
+        path_to_phash = {e['path']: e.get('phash') for e in entries}
+
         for group in phash_groups:
-            # Classify by tightest hamming distance in group
-            min_dist = self._min_hamming_in_group(group, entries)
+            min_dist = self._min_hamming_in_group(group, path_to_phash)
             dup_type = 'exact' if min_dist <= self.PHASH_EXACT_THRESHOLD else 'near_exact'
-            keep, remove = self._pick_representative(group, entries)
-            result.append({
-                'type':   dup_type,
-                'paths':  group,
-                'keep':   keep,
-                'remove': remove
-            })
+            keep, remove = self._pick_representative(group)
+            result.append({'type': dup_type, 'paths': group, 'keep': keep, 'remove': remove})
 
         for group in emb_groups:
-            keep, remove = self._pick_representative(group, entries)
-            result.append({
-                'type':   'semantic',
-                'paths':  group,
-                'keep':   keep,
-                'remove': remove
-            })
+            keep, remove = self._pick_representative(group)
+            result.append({'type': 'semantic', 'paths': group, 'keep': keep, 'remove': remove})
 
         return result
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _min_hamming_in_group(self, group: List[str], entries: List[Dict]) -> int:
-        path_to_phash = {e['path']: e.get('phash') for e in entries}
+    def _min_hamming_in_group(self, group: List[str], path_to_phash: Dict) -> int:
         min_dist = 999
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
@@ -269,11 +397,10 @@ class DuplicateDetector:
                     min_dist = min(min_dist, hamming_distance(ha, hb))
         return min_dist if min_dist < 999 else 0
 
-    def _pick_representative(self, group: List[str], entries: List[Dict]) -> Tuple[str, List[str]]:
+    def _pick_representative(self, group: List[str]) -> Tuple[str, List[str]]:
         """
-        Choose which image to KEEP from a duplicate group.
-        Strategy: keep the one with largest file size (typically highest quality).
-        Ties broken by first appearance (original, not copy).
+        Keep the largest file (typically highest quality).
+        Ties broken by lexicographic order (stable, reproducible).
         """
         import os
         def file_size(p):
@@ -282,7 +409,5 @@ class DuplicateDetector:
             except OSError:
                 return 0
 
-        ranked = sorted(group, key=file_size, reverse=True)
-        keep   = ranked[0]
-        remove = ranked[1:]
-        return keep, remove
+        ranked = sorted(group, key=lambda p: (file_size(p), p), reverse=True)
+        return ranked[0], ranked[1:]
