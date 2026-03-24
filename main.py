@@ -443,7 +443,6 @@ def main():
     elif args.command == "dedupe":
         import time as _time
         from src.duplicate_detector import DuplicateDetector, phash_to_bytes, compute_phash, bytes_to_phash
-        import os
 
         db = PhotoDatabase()
         total = db.get_photo_count()
